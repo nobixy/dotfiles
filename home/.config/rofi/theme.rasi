@@ -1,0 +1,136 @@
+/* Rice palette: Catppuccin Mocha surfaces + cyan/green accent.
+   The window is slightly translucent; Hyprland blurs behind it (rules.lua). */
+
+* {
+    base:     #1e1e2ee6;
+    mantle:   #181825;
+    surface0: #313244;
+    surface1: #45475a;
+    overlay0: #6c7086;
+    text:     #cdd6f4;
+    cyan:     #33ccff;
+    green:    #00ff99;
+    red:      #f38ba8;
+
+    font:             "FiraCode Nerd Font 11";
+    background-color: transparent;
+    text-color:       @text;
+    spacing:          0;
+    margin:           0;
+    padding:          0;
+}
+
+window {
+    width:            620px;
+    location:         center;
+    anchor:           center;
+    background-color: @base;
+    border:           2px;
+    border-color:     @cyan;
+    border-radius:    12px;
+}
+
+mainbox {
+    padding:  14px;
+    spacing:  12px;
+    children: [ "inputbar", "message", "listview", "mode-switcher" ];
+}
+
+inputbar {
+    padding:          10px 14px;
+    spacing:          10px;
+    background-color: @surface0;
+    border-radius:    8px;
+    children:         [ "prompt", "entry" ];
+}
+
+prompt {
+    text-color: @cyan;
+    font:       "FiraCode Nerd Font Bold 11";
+}
+
+entry {
+    placeholder:       "Search";
+    placeholder-color: @overlay0;
+    cursor:            text;
+}
+
+message {
+    padding:          8px 12px;
+    background-color: @surface0;
+    border-radius:    8px;
+}
+
+textbox {
+    text-color: @text;
+}
+
+listview {
+    lines:        9;
+    columns:      1;
+    fixed-height: false;
+    dynamic:      true;
+    scrollbar:    false;
+    spacing:      4px;
+}
+
+element {
+    padding:       8px 12px;
+    spacing:       12px;
+    border-radius: 8px;
+}
+
+element normal.normal,
+element alternate.normal {
+    background-color: transparent;
+}
+
+element normal.urgent,
+element alternate.urgent {
+    text-color: @red;
+}
+
+element normal.active,
+element alternate.active {
+    text-color: @green;
+}
+
+element selected.normal,
+element selected.active {
+    background-color: @surface1;
+    text-color:       @cyan;
+    border:           0 0 0 3px;
+    border-color:     @green;
+}
+
+element selected.urgent {
+    background-color: @red;
+    text-color:       @mantle;
+}
+
+element-icon {
+    size:           24px;
+    vertical-align: 0.5;
+}
+
+element-text {
+    text-color:     inherit;
+    vertical-align: 0.5;
+    highlight:      bold #00ff99;
+}
+
+mode-switcher {
+    spacing: 8px;
+}
+
+button {
+    padding:          6px;
+    border-radius:    8px;
+    background-color: @surface0;
+    text-color:       @overlay0;
+}
+
+button selected {
+    background-color: @surface1;
+    text-color:       @cyan;
+}

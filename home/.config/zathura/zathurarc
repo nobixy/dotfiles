@@ -1,0 +1,37 @@
+# zathura: rice palette (Catppuccin Mocha + cyan accent)
+set selection-clipboard clipboard
+set adjust-open "best-fit"
+set font "FiraCode Nerd Font 10"
+set guioptions "sv"
+
+set default-fg                "#cdd6f4"
+set default-bg                "#1e1e2e"
+set completion-bg             "#313244"
+set completion-fg             "#cdd6f4"
+set completion-highlight-bg   "#33ccff"
+set completion-highlight-fg   "#11111b"
+set completion-group-bg       "#313244"
+set completion-group-fg       "#33ccff"
+set statusbar-fg              "#cdd6f4"
+set statusbar-bg              "#181825"
+set inputbar-fg               "#cdd6f4"
+set inputbar-bg               "#181825"
+set notification-bg           "#1e1e2e"
+set notification-fg           "#cdd6f4"
+set notification-error-bg     "#1e1e2e"
+set notification-error-fg     "#f38ba8"
+set notification-warning-bg   "#1e1e2e"
+set notification-warning-fg   "#f9e2af"
+set highlight-color           "rgba(51, 204, 255, 0.35)"
+set highlight-active-color    "rgba(0, 255, 153, 0.45)"
+set index-fg                  "#cdd6f4"
+set index-bg                  "#1e1e2e"
+set index-active-fg           "#11111b"
+set index-active-bg           "#33ccff"
+set render-loading-bg         "#1e1e2e"
+set render-loading-fg         "#cdd6f4"
+
+# Dark pages on demand: ctrl+r toggles recolor
+set recolor-lightcolor        "#1e1e2e"
+set recolor-darkcolor         "#cdd6f4"
+set recolor-keephue           true

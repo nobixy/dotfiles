@@ -1,0 +1,4 @@
+# Files the apps write into their (linked) config folders that aren't config
+__pycache__/
+*.log
+home/.config/gtk-3.0/bookmarks

@@ -1,0 +1,39 @@
+[user]
+	name = Joseph Noblett
+	email = noblettjoe@gmail.com
+
+# HTTPS auth through the GitHub CLI (written by `gh auth setup-git`)
+[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+
+[init]
+	defaultBranch = main
+[commit]
+	verbose = true            # show the diff while writing the message
+[pull]
+	rebase = true             # replay local commits on top instead of a merge commit
+[push]
+	autoSetupRemote = true    # first `git push` of a new branch just works
+[fetch]
+	prune = true              # forget branches deleted on the remote
+[help]
+	autocorrect = prompt      # `git stauts` offers to run `git status`
+
+# Diffs and conflicts: delta pager, Catppuccin colours
+[core]
+	pager = delta
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true           # n / N jump between files
+	line-numbers = true
+	syntax-theme = Catppuccin Mocha
+[diff]
+	algorithm = histogram
+	colorMoved = default
+[merge]
+	conflictStyle = zdiff3

@@ -1,0 +1,161 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+# Two-line prompt: context on top, input below.
+# Colors match the Hyprland border gradient (#33ccff -> #00ff99).
+add_newline = true
+command_timeout = 1000
+
+format = """
+$os\
+$username\
+$hostname\
+$directory\
+$git_branch\
+$git_state\
+$git_status\
+$git_metrics\
+$python\
+$nodejs\
+$bun\
+$rust\
+$golang\
+$java\
+$lua\
+$c\
+$docker_context\
+$cmd_duration\
+$jobs\
+$line_break\
+$character"""
+
+right_format = "$status$time"
+
+palette = "hypr"
+
+[palettes.hypr]
+cyan  = "#33ccff"
+green = "#00ff99"
+red   = "#ff5f6d"
+amber = "#ffc857"
+dim   = "#7a7a7a"
+
+# ---------- System ----------
+[os]
+disabled = false
+style = "bold cyan"
+format = "[$symbol]($style)"
+
+[os.symbols]
+Arch = " "
+
+# Only shown over SSH or as root
+[username]
+style_user = "bold green"
+style_root = "bold red"
+format = "[$user]($style)"
+
+[hostname]
+ssh_only = true
+style = "bold green"
+format = "[@$hostname]($style) "
+
+[directory]
+style = "bold cyan"
+read_only = " 󰌾"
+truncation_length = 4
+truncate_to_repo = true
+repo_root_style = "bold green"
+format = "[$path]($style)[$read_only]($read_only_style) "
+
+# ---------- Git ----------
+[git_branch]
+symbol = " "
+style = "bold green"
+format = "[$symbol$branch(:$remote_branch)]($style) "
+
+[git_status]
+style = "amber"
+format = "([\\[$all_status$ahead_behind\\]]($style) )"
+
+[git_state]
+style = "bold red"
+
+[git_metrics]
+disabled = false
+added_style = "green"
+deleted_style = "red"
+format = "([+$added]($added_style) )([-$deleted]($deleted_style) )"
+
+# ---------- Languages (only appear inside matching projects) ----------
+[python]
+symbol = " "
+# Only real projects or an active venv, not loose scripts in ~
+detect_extensions = []
+style = "amber"
+format = '[${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
+
+[nodejs]
+symbol = " "
+style = "green"
+format = "[$symbol($version )]($style)"
+
+[bun]
+symbol = " "
+format = "[$symbol($version )]($style)"
+
+[rust]
+symbol = "󱘗 "
+format = "[$symbol($version )]($style)"
+
+[golang]
+symbol = " "
+style = "cyan"
+format = "[$symbol($version )]($style)"
+
+[java]
+symbol = " "
+format = "[$symbol($version )]($style)"
+
+[lua]
+symbol = " "
+format = "[$symbol($version )]($style)"
+
+[c]
+symbol = " "
+format = "[$symbol($version(-$name) )]($style)"
+
+[docker_context]
+symbol = " "
+style = "cyan"
+format = "[$symbol$context]($style) "
+
+# ---------- Status ----------
+[cmd_duration]
+min_time = 2000
+style = "amber"
+format = "took [$duration]($style) "
+
+[jobs]
+symbol = "✦"
+style = "bold cyan"
+
+[status]
+disabled = false
+symbol = "✘ "
+style = "red"
+format = "[$symbol$status]($style) "
+
+[time]
+disabled = false
+style = "dim"
+time_format = "%-I:%M %p"
+format = "[$time]($style)"
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold cyan)"
+vimcmd_replace_one_symbol = "[❮](bold red)"
+vimcmd_replace_symbol = "[❮](bold red)"
+vimcmd_visual_symbol = "[❮](bold amber)"
+

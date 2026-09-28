@@ -1,0 +1,27 @@
+configuration {
+    modi:                "drun,run,window";
+    show-icons:          true;
+    icon-theme:          "breeze-dark";
+    terminal:            "kitty";
+    drun-display-format: "{name}";
+    display-drun:        "Apps";
+    display-run:         "Run";
+    display-window:      "Windows";
+    display-dmenu:       "";
+    sort:                true;
+    sorting-method:      "fzf";
+    matching:            "fuzzy";
+    hover-select:        true;
+    me-select-entry:     "";
+    me-accept-entry:     "MousePrimary";
+    display-recursivebrowser: "Files";
+
+    /* ALT+F f: every file under ~, opened with its default app */
+    recursivebrowser {
+        directory:    "/home/noblixy";
+        filter-regex: "^([.].*|node_modules|__pycache__|venv|calendar_env|yay)$";
+        command:      "xdg-open";
+    }
+}
+
+@theme "~/.config/rofi/theme.rasi"

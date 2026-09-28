@@ -1,0 +1,12 @@
+# yazi: only what differs from the defaults, so upstream changes don't break it.
+# Defaults: https://github.com/sxyazi/yazi/blob/main/yazi-config/preset/yazi-default.toml
+# Default keys worth knowing: ~ help, g h home, z fzf jump, Z zoxide jump,
+# Enter open, O "open with…" (includes $EDITOR)
+
+[mgr]
+linemode = "size"   # show file sizes
+
+[preview]
+# Sharper image previews on the 1440p monitor (default 600x900)
+max_width  = 2400
+max_height = 3600

@@ -1,0 +1,86 @@
+/* Waybar in the rice palette: Catppuccin Mocha surfaces, cyan/green accents.
+   Slightly translucent; Hyprland blurs behind it (hypr/modules/rules.lua). */
+
+@define-color base     rgba(30, 30, 46, 0.92);
+@define-color crust    #11111b;
+@define-color surface0 #313244;
+@define-color overlay0 #6c7086;
+@define-color subtext  #a6adc8;
+@define-color text     #cdd6f4;
+@define-color cyan     #33ccff;
+@define-color green    #00ff99;
+@define-color red      #f38ba8;
+@define-color yellow   #f9e2af;
+
+* {
+    font-family: "FiraCode Nerd Font", monospace;
+    font-size: 14px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: @base;
+    color: @text;
+}
+
+tooltip {
+    background-color: @base;
+    border: 1px solid @cyan;
+    border-radius: 8px;
+}
+
+/* Workspaces: active one filled cyan */
+#workspaces button {
+    padding: 0 10px;
+    margin: 3px 2px;
+    color: @subtext;
+    border-radius: 6px;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+#workspaces button:hover {
+    background: @surface0;
+}
+
+#workspaces button.active {
+    background-color: @cyan;
+    color: @crust;
+    font-weight: bold;
+}
+
+#workspaces button.urgent {
+    background-color: @red;
+    color: @crust;
+}
+
+/* Open leader group, e.g. "find" after ALT+F */
+#submap {
+    margin: 3px 4px;
+    padding: 0 8px;
+    border-radius: 6px;
+    background-color: @green;
+    color: @crust;
+    font-weight: bold;
+}
+
+#custom-dnd,
+#pulseaudio,
+#network,
+#clock,
+#tray {
+    padding: 0 10px;
+}
+
+#custom-dnd.on { color: @yellow; }
+#pulseaudio.muted { color: @overlay0; }
+#network.disconnected { color: @red; }
+
+#clock {
+    color: @cyan;
+    font-weight: bold;
+}
+
+#tray > .needs-attention {
+    background-color: @red;
+}

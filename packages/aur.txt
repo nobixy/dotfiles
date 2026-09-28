@@ -1,0 +1,4 @@
+antigravity
+claude-code
+claude-code-ui
+google-chrome

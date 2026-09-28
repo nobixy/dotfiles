@@ -1,0 +1,124 @@
+// Waybar: a full bar on the main monitor, a slim one on the side monitors.
+// Restart after editing: ALT+R, then s. See `man waybar` and `man waybar-<module>`.
+//
+// Workspaces use ext/workspaces (Wayland protocol): hyprland/workspaces sends
+// the old `dispatch workspace N` syntax, which Hyprland's Lua config rejects,
+// so clicking a workspace did nothing.
+[
+    {
+        // The LG, plus any monitor not listed in the side bar (a laptop, a TV)
+        "output": ["!HDMI-A-1", "!DP-2", "*"],
+        "layer": "top",
+        "position": "top",
+        "height": 30,
+        "modules-left": ["ext/workspaces", "hyprland/submap"],
+        "modules-center": ["hyprland/window"],
+        "modules-right": ["custom/dnd", "pulseaudio", "network", "clock", "tray"],
+
+        "ext/workspaces": {
+            "format": "{name}",
+            "on-click": "activate",
+            "sort-by-id": true
+        },
+
+        // The open ALT leader group (find, split, toggle, ...)
+        "hyprland/submap": {
+            "format": "󰌌 {}",
+            "tooltip": false
+        },
+
+        "hyprland/window": {
+            "format": "{title}",
+            "max-length": 60,
+            "separate-outputs": true,
+            "rewrite": {
+                "(.*) - Google Chrome": "$1",
+                "(.*) - Antigravity": "$1"
+            }
+        },
+
+        // Do not disturb (ALT+T, then d). Refreshed by `pkill -RTMIN+8 waybar`
+        "custom/dnd": {
+            "exec": "~/.config/waybar/scripts/dnd.sh",
+            "return-type": "json",
+            "interval": "once",
+            "signal": 8,
+            "on-click": "dunstctl set-paused toggle; pkill -RTMIN+8 waybar",
+            "on-click-right": "dunstctl history-pop"
+        },
+
+        "pulseaudio": {
+            "format": "{icon} {volume}%",
+            "format-muted": "󰝟 muted",
+            "format-icons": {
+                "headphone": "󰋋",
+                "default": ["󰕿", "󰖀", "󰕾"]
+            },
+            "tooltip-format": "{desc}: {volume}%",
+            "scroll-step": 5,
+            "max-volume": 150,
+            "on-click": "pavucontrol",
+            "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+        },
+
+        "network": {
+            "interval": 5,
+            "format-ethernet": "󰈀",
+            "format-wifi": "󰖩 {signalStrength}%",
+            "format-disconnected": "󰌙",
+            "tooltip-format-ethernet": "{ifname}  {ipaddr}/{cidr}\n↓ {bandwidthDownBytes}   ↑ {bandwidthUpBytes}",
+            "tooltip-format-wifi": "{essid} ({signalStrength}%)  {ipaddr}\n↓ {bandwidthDownBytes}   ↑ {bandwidthUpBytes}",
+            "tooltip-format-disconnected": "Offline"
+        },
+
+        "clock": {
+            "format": "{:%I:%M %p · %a, %b %d}",
+            "tooltip-format": "<tt><small>{calendar}</small></tt>",
+            "calendar": {
+                "mode": "month",
+                "format": {
+                    "months":   "<span color='#33ccff'><b>{}</b></span>",
+                    "weekdays": "<span color='#00ff99'><b>{}</b></span>",
+                    "today":    "<span color='#11111b' background='#33ccff'><b>{}</b></span>"
+                }
+            },
+            "on-click": "xdg-open https://calendar.google.com"
+        },
+
+        "tray": {
+            "icon-size": 16,
+            "spacing": 8
+        }
+    },
+
+    {
+        // BenQ and Asus
+        "output": ["HDMI-A-1", "DP-2"],
+        "layer": "top",
+        "position": "top",
+        "height": 30,
+        "modules-left": ["ext/workspaces"],
+        "modules-center": ["hyprland/window"],
+        "modules-right": ["clock"],
+
+        "ext/workspaces": {
+            "format": "{name}",
+            "on-click": "activate",
+            "sort-by-id": true
+        },
+
+        "hyprland/window": {
+            "format": "{title}",
+            "max-length": 60,
+            "separate-outputs": true,
+            "rewrite": {
+                "(.*) - Google Chrome": "$1",
+                "(.*) - Antigravity": "$1"
+            }
+        },
+
+        "clock": {
+            "format": "{:%I:%M %p · %a, %b %d}"
+        }
+    }
+]

@@ -1,0 +1,25 @@
+# ~/.config/lazygit/config.yml
+# Catppuccin Mocha theme with Cyan (#33ccff) and Green (#00ff99) rice accents
+
+gui:
+  nerdFontsVersion: "3"
+  theme:
+    activeBorderColor:
+      - '#33ccff'
+      - bold
+    inactiveBorderColor:
+      - '#45475a'
+    optionsTextColor:
+      - '#33ccff'
+    selectedLineBgColor:
+      - '#313244'
+    cherryPickedCommitBgColor:
+      - '#45475a'
+    cherryPickedCommitFgColor:
+      - '#00ff99'
+    unstagedChangesColor:
+      - '#f38ba8'
+    defaultFgColor:
+      - '#cdd6f4'
+    searchingActiveBorderColor:
+      - '#00ff99'

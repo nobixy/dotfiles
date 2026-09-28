@@ -1,0 +1,2 @@
+# bat (cat alias in .zshrc): match the terminal palette
+--theme="Catppuccin Mocha"

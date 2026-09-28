@@ -1,0 +1,49 @@
+# yazi: rice palette (Catppuccin Mocha + cyan/green).
+# Key names: https://github.com/sxyazi/yazi/blob/main/yazi-config/preset/theme-dark.toml
+
+[app]
+overall = { bg = "#1e1e2e" }
+
+[mgr]
+cwd = { fg = "#33ccff" }
+
+find_keyword  = { fg = "#f9e2af", italic = true }
+find_position = { fg = "#f5c2e7", bg = "reset", italic = true }
+
+marker_copied   = { fg = "#00ff99", bg = "#00ff99" }
+marker_cut      = { fg = "#f38ba8", bg = "#f38ba8" }
+marker_marked   = { fg = "#33ccff", bg = "#33ccff" }
+marker_selected = { fg = "#89b4fa", bg = "#89b4fa" }
+
+count_copied   = { fg = "#11111b", bg = "#00ff99" }
+count_cut      = { fg = "#11111b", bg = "#f38ba8" }
+count_selected = { fg = "#11111b", bg = "#89b4fa" }
+
+border_symbol = "│"
+border_style  = { fg = "#45475a" }
+
+[tabs]
+active   = { fg = "#11111b", bg = "#33ccff", bold = true }
+inactive = { fg = "#cdd6f4", bg = "#181825" }
+
+[mode]
+normal_main = { fg = "#11111b", bg = "#33ccff", bold = true }
+normal_alt  = { fg = "#33ccff", bg = "#313244" }
+select_main = { fg = "#11111b", bg = "#00ff99", bold = true }
+select_alt  = { fg = "#00ff99", bg = "#313244" }
+unset_main  = { fg = "#11111b", bg = "#f38ba8", bold = true }
+unset_alt   = { fg = "#f38ba8", bg = "#313244" }
+
+[indicator]
+parent  = { fg = "#1e1e2e", bg = "#cdd6f4" }
+current = { fg = "#11111b", bg = "#33ccff" }
+
+[status]
+progress_label  = { fg = "#ffffff", bold = true }
+progress_normal = { fg = "#33ccff", bg = "#313244" }
+progress_error  = { fg = "#f38ba8", bg = "#313244" }
+perm_type       = { fg = "#33ccff" }
+perm_read       = { fg = "#f9e2af" }
+perm_write      = { fg = "#f38ba8" }
+perm_exec       = { fg = "#00ff99" }
+perm_sep        = { fg = "#6c7086" }

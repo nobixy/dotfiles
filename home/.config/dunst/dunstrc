@@ -1,0 +1,97 @@
+# Dunst: notifications in the rice palette (Catppuccin Mocha + cyan/green).
+# Reload after editing: dunstctl reload
+# See `man 5 dunst`.
+
+[global]
+    monitor = 0
+    follow = mouse
+
+    width = (280, 380)
+    height = (0, 200)
+    origin = top-right
+    offset = (12, 12)
+    notification_limit = 6
+    gap_size = 6
+
+    progress_bar = true
+    progress_bar_height = 8
+    progress_bar_frame_width = 0
+    progress_bar_min_width = 150
+    progress_bar_max_width = 380
+    progress_bar_corner_radius = 4
+    highlight = "#33ccff"
+
+    padding = 12
+    horizontal_padding = 14
+    text_icon_padding = 12
+    frame_width = 2
+    frame_color = "#33ccff"
+    separator_color = frame
+    corner_radius = 10
+    transparency = 0
+
+    font = FiraCode Nerd Font 10
+    line_height = 2
+    markup = full
+    format = "<b>%s</b>\n%b"
+    alignment = left
+    vertical_alignment = center
+    show_age_threshold = 60
+    ellipsize = end
+    ignore_newline = no
+    stack_duplicates = true
+    hide_duplicate_count = false
+    show_indicators = no
+
+    enable_recursive_icon_lookup = true
+    icon_theme = "breeze-dark, Adwaita"
+    icon_position = left
+    min_icon_size = 32
+    max_icon_size = 64
+
+    sticky_history = yes
+    history_length = 30
+
+    browser = /usr/bin/xdg-open
+    always_run_script = true
+    title = Dunst
+    class = Dunst
+    ignore_dbusclose = false
+
+    mouse_left_click = do_action, close_current
+    mouse_middle_click = close_current
+    mouse_right_click = close_all
+
+[urgency_low]
+    background = "#1e1e2ef0"
+    foreground = "#cdd6f4"
+    frame_color = "#45475a"
+    timeout = 4
+
+[urgency_normal]
+    background = "#1e1e2ef0"
+    foreground = "#cdd6f4"
+    frame_color = "#33ccff"
+    timeout = 8
+
+[urgency_critical]
+    background = "#1e1e2ef0"
+    foreground = "#cdd6f4"
+    frame_color = "#f38ba8"
+    highlight = "#f38ba8"
+    timeout = 0
+
+# Volume / mic OSD from ~/.config/hypr/scripts/volume.sh
+[osd]
+    appname = osd
+    format = "<b>%s</b> %b"
+    frame_color = "#00ff99"
+    highlight = "#00ff99"
+    history_ignore = yes
+    min_icon_size = 24
+    max_icon_size = 24
+
+[screenshot]
+    appname = screenshot
+    frame_color = "#00ff99"
+    max_icon_size = 96

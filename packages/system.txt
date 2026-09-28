@@ -1,0 +1,16 @@
+amd-ucode
+base
+btrfs-progs
+efibootmgr
+lib32-nvidia-utils
+libva-nvidia-driver
+limine
+linux
+linux-firmware
+lvm2
+mkinitcpio
+nvidia-open
+nvidia-settings
+nvidia-utils
+snap-pac
+snapper
