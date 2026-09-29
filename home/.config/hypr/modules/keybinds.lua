@@ -171,6 +171,17 @@ group("R", "rename/restart", {
     { "h", exec("hyprctl reload"), "reload Hyprland config" },
 })
 
+-- <leader>i: study. The agent buttons run in the background and report back
+-- through a notification (~/.local/bin/eecs-agent).
+local agent = v.home .. "/.local/bin/eecs-agent"
+group("I", "study", {
+    { "p", exec(agent .. " plan"),         "plan my day" },
+    { "w", exec(agent .. " shifts"),       "sync work shifts" },
+    { "i", exec(agent .. " shifts-paste"), "type in shifts" },
+    { "c", exec(agent .. " coach"),        "coach: rebuild the week" },
+    { "a", exec(agent .. " menu"),         "all agents" },
+})
+
 ---------------------------
 ---- PROGRAMS (direct) ----
 ---------------------------

@@ -33,7 +33,7 @@ check "git config" git_config
 check "tmux config" tmux_config
 check "Neovim starts without errors" nvim --headless +qa
 
-scripts=("$DOTFILES"/*.sh "$H"/.config/hypr/scripts/*.sh "$H"/.config/waybar/scripts/*.sh)
+scripts=("$DOTFILES"/*.sh "$H"/.config/hypr/scripts/*.sh "$H"/.config/waybar/scripts/*.sh "$H"/.local/bin/eecs-*)
 for script in "${scripts[@]}"; do
     check "bash -n ${script#"$DOTFILES"/}" bash -n "$script"
 done

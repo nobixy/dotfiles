@@ -29,7 +29,7 @@ sudo pacman -Syu --needed "${packages[@]}"
 step "Linking configs into ~ (stow)"
 # These must be real directories, or stow would link the whole folder into
 # the repo and every app's files would end up in git
-mkdir -p ~/.config ~/.local/share
+mkdir -p ~/.config ~/.local/share ~/.local/bin ~/.local/state
 stow --restow --target="$HOME" home
 
 step "Installing yay and the AUR packages from packages/aur.txt"

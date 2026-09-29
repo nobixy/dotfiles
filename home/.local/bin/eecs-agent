@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# eecs-agent: the study agent buttons behind ALT+I in Hyprland.
+#
+#   eecs-agent plan          ask how you feel, then plan the rest of today
+#   eecs-agent shifts        read upcoming shifts from the roster site in Chrome
+#                            and sync them to Google Calendar
+#   eecs-agent shifts-paste  type shifts in by hand ("thu 4-11:30pm, fri 5pm-1am")
+#   eecs-agent coach         run the cloud coach now (it rebuilds tomorrow onward)
+#   eecs-agent menu          pick one of the above in rofi
+#   eecs-agent last          show the most recent result again
+#
+# Each agent is a headless Claude Code run (claude -p) in its own systemd user
+# unit, eecs-agent-<name>, so a second press while one runs just says so. The
+# full output goes to the journal (journalctl --user -u eecs-agent-plan) and
+# to ~/.local/state/eecs/agents/. Every run gets only the tools its job needs;
+# anything else is refused without asking.
+#
+# The instructions are private Claude Code skills (~/.claude/skills/eecs-*),
+# and the settings (calendar ids, the rules doc, the roster URL) live in
+# ~/.config/eecs/config.json. Neither is in this repo.
+set -euo pipefail
+
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/eecs/config.json
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/eecs/agents
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+CAL=mcp__claude_ai_Google_Calendar
+DRIVE=mcp__claude_ai_Google_Drive
+
+conf() { jq -r "$1" "$CONFIG"; }
+today() { TZ=$(conf .timezone) date +%F; }
+now() { TZ=$(conf .timezone) date +%Y-%m-%dT%H:%M; }
+uri() { jq -rn --arg s "$1" '$s | @uri'; }
+
+# notify <title> <body> [urgency]
+notify() { notify-send -a eecs -u "${3:-normal}" "$1" "$2"; }
+
+# Permission settings that allow exactly the given tools
+allow() { jq -cn '{permissions: {allow: $ARGS.positional}}' --args "$@"; }
+
+# claude_run <settings> [flags...] -- <prompt>: one headless run, JSON on
+# stdout. Anything that would ask for permission is denied instead.
+claude_run() {
+    local settings=$1 args=()
+    shift
+    while [ "$1" != "--" ]; do args+=("$1"); shift; done
+    claude -p --model "$(conf .models.default)" --no-session-persistence \
+        --output-format json --permission-mode dontAsk --permission-prompts none \
+        --settings "$settings" "${args[@]}" "$2"
+}
+
+# The object a --json-schema run returned
+structured() { jq -c '.structured_output // (.result | fromjson? // empty)'; }
+
+# save <name> <output> <summary>: keep the raw output and the last summary
+save() {
+    printf '%s\n' "$2" >"$STATE/$1.json"
+    printf '%s\n' "$3" >"$STATE/last.txt"
+}
+
+# fail <name> <output>
+fail() {
+    save "$1" "$2" "The $1 agent failed."
+    notify "The $1 agent failed" "$(jq -r '.result // empty' <<<"$2" 2>/dev/null | head -c 300)
+Details: journalctl --user -u eecs-agent-$1" critical
+}
+
+# Checks every agent needs before it spends any usage
+preflight() {
+    [ -r "$CONFIG" ] || { notify "eecs-agent" "Missing $CONFIG" critical; return 1; }
+    command -v claude >/dev/null || { notify "eecs-agent" "claude is not installed" critical; return 1; }
+    local code=0
+    curl -fsS -m 5 -o /dev/null https://api.anthropic.com/ 2>/dev/null || code=$?
+    # 22 is an HTTP error status: the API answered, so the network is fine
+    if [ "$code" -ne 0 ] && [ "$code" -ne 22 ]; then
+        notify "Offline" "Can't reach Claude right now, so nothing ran." critical
+        return 1
+    fi
+}
+
+# The roster reader drives the real Chrome through the Claude extension
+preflight_chrome() {
+    if ! pgrep -x chrome >/dev/null; then
+        notify "Chrome isn't running" "Open Chrome, then press ALT+I w again. Nothing was written." critical
+        return 1
+    fi
+    local host
+    host=$(jq -r .path ~/.config/google-chrome/NativeMessagingHosts/com.anthropic.claude_code_browser_extension.json 2>/dev/null || true)
+    if [ ! -x "$host" ]; then
+        notify "Chrome link missing" "Run /chrome once in Claude Code, then press ALT+I w again. Nothing was written." critical
+        return 1
+    fi
+}
+
+# launch <name> [args]: run "eecs-agent _run <name>" in its own user unit, so
+# it outlives the key press and never runs twice at once
+launch() {
+    local name=$1
+    shift
+    if systemctl --user is-active --quiet "eecs-agent-$name"; then
+        notify "Already running" "The $name agent is still working. It will tell you when it's done."
+        return
+    fi
+    systemctl --user reset-failed "eecs-agent-$name" 2>/dev/null || true
+    systemd-run --user --quiet --collect --unit "eecs-agent-$name" \
+        --setenv=PATH="$PATH" --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+        "$SELF" _run "$name" "$@"
+}
+
+##############
+## Plan my day
+
+plan_ask() {
+    local energy
+    energy=$(printf 'ok\nlow\nwiped\n' | rofi -dmenu -i -no-custom -p "how do you feel" \
+        -mesg "Plan the rest of today") || return 0
+    launch plan "$energy"
+}
+
+# The Morning section of a daily note
+morning() { awk '/^## Morning/ { f = 1; next } f && /^(## |- \*\*Active Block)/ { exit } f' "$1"; }
+
+run_plan() {
+    local energy=$1 vault settings out summary note action
+    vault=$(conf .vault)
+    notify "Planning your day" "Reading your vault and calendar. About two minutes."
+    settings=$(allow Read Glob Grep \
+        "Edit(/$vault/10 - Daily Log/**)" "Write(/$vault/10 - Daily Log/**)" \
+        "${DRIVE}__read_file_content" "${CAL}__list_events" "${CAL}__get_event" \
+        "${CAL}__create_event" "${CAL}__update_event" "${CAL}__delete_event")
+    if ! out=$(cd "$vault" && claude_run "$settings" --no-chrome -- "/eecs-plan-day energy=$energy now=$(now)
+Rules doc (Google Drive id): $(conf .rules_doc_id)
+Calendars: primary=$(conf .calendars.primary) plan=$(conf .calendars.plan) family=$(conf .calendars.family) runna=$(conf .calendars.runna)"); then
+        fail plan "$out"
+        return
+    fi
+    summary=$(jq -r '.result // "No result."' <<<"$out")
+    save plan "$out" "$summary"
+
+    # The vault is public: the Morning section must not reveal times or work
+    note="$vault/10 - Daily Log/$(today).md"
+    if [ -f "$note" ] && morning "$note" | grep -qiE '\b([01]?[0-9]|2[0-3]):[0-5][0-9]\b|\b[0-9]{1,2} ?(am|pm)\b|shift'; then
+        notify "Privacy check" "Today's Morning section mentions a time or a shift. Remove it before obsidian-git pushes (every 30 min)." critical
+    fi
+
+    action=$(notify-send -a eecs -A open="Open today's note" "Plan my day" "$(head -c 700 <<<"$summary")") || true
+    if [ "$action" = open ]; then
+        xdg-open "obsidian://open?vault=$(uri "$(basename "$vault")")&file=$(uri "10 - Daily Log/$(today)")"
+    fi
+}
+
+#########
+## Shifts
+
+roster_schema() {
+    jq -cn '{type: "object", required: ["status", "shifts", "message"], properties: {
+        status: {type: "string", enum: ["ok", "needs_login", "error"]},
+        range_start: {type: "string"}, range_end: {type: "string"},
+        shifts: {type: "array", items: {type: "object", required: ["date", "start", "end"], properties: {
+            date: {type: "string"}, start: {type: "string"}, end: {type: "string"}, role: {type: "string"}}}},
+        message: {type: "string"}}}'
+}
+
+diff_schema() {
+    jq -cn '{type: "object", required: ["created", "updated", "adopted", "deleted", "unchanged"], properties: {
+        created: {type: "array", items: {type: "string"}}, updated: {type: "array", items: {type: "string"}},
+        adopted: {type: "array", items: {type: "string"}}, deleted: {type: "array", items: {type: "string"}},
+        unchanged: {type: "integer"}, notes: {type: "string"}}}'
+}
+
+# stdin: roster JSON. Prints it back, limited to today onward, only if it
+# passes the safety checks; otherwise prints nothing and fails.
+validate_roster() {
+    jq -c --arg today "$(today)" '
+        def day: test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$");
+        def clock: test("^([01][0-9]|2[0-3]):[0-5][0-9]$");
+        def epoch: strptime("%Y-%m-%d") | mktime;
+        select(.status == "ok" and (.shifts | type) == "array" and (.shifts | length) <= 40)
+        | select((.range_start // "" | day) and (.range_end // "" | day))
+        | select(.range_start <= .range_end and .range_end >= $today)
+        | select((.range_end | epoch) - (.range_start | epoch) <= 45 * 86400)
+        | . as $r
+        | select(all(.shifts[]; (.date | day) and .date >= $r.range_start and .date <= $r.range_end
+            and (.start | clock) and (.end | clock)))
+        | .range_start = ([.range_start, $today] | max)
+        | .shifts |= map(select(.date >= $today))
+    ' | grep .
+}
+
+# shifts_writer <dry-run|apply> <allowed|forbidden> <roster>: prints the
+# change list. A dry run doesn't even get the tools that write.
+shifts_writer() {
+    local tools=("${CAL}__list_events" "${CAL}__search_events" "${CAL}__get_event")
+    [ "$1" = apply ] && tools+=("${CAL}__create_event" "${CAL}__update_event" "${CAL}__delete_event")
+    claude_run "$(allow "${tools[@]}")" --no-chrome --tools "" --json-schema "$(diff_schema)" -- "/eecs-shifts-write
+mode: $1
+deletes: $2
+primary calendar: $(conf .calendars.primary)
+roster: $3" | structured | grep .
+}
+
+# One line per change, for the confirmation prompt and the notification
+changes() {
+    jq -r '(.created[]? | "new    " + .), (.adopted[]? | "linked " + .),
+           (.updated[]? | "moved  " + .), (.deleted[]? | "gone   " + .)' <<<"$1"
+}
+
+# write_shifts <roster> <allowed|forbidden> <always|if-risky>: dry run, ask
+# when the change is risky (or asked to), then apply
+write_shifts() {
+    local roster=$1 deletes=$2 ask=$3 plan count applied
+    if ! plan=$(shifts_writer dry-run "$deletes" "$roster"); then
+        notify "Shift sync failed" "Couldn't compare with your calendar. Nothing was written." critical
+        return
+    fi
+    count=$(jq '[.created, .updated, .adopted, .deleted | length] | add' <<<"$plan")
+    if [ "$count" -eq 0 ]; then
+        notify "Shifts up to date" "Nothing to change ($(jq .unchanged <<<"$plan") shifts already on the calendar)."
+        return
+    fi
+    # Ask for anything that moves or removes a shift, and for the first sync ever
+    if [ "$ask" = always ] || [ ! -e "$STATE/shifts-confirmed-once" ] ||
+        [ "$(jq '(.updated | length) + (.deleted | length)' <<<"$plan")" -gt 0 ]; then
+        if [ "$(printf 'Apply\nCancel\n' | rofi -dmenu -no-custom -p "shifts" -mesg "$(changes "$plan")")" != Apply ]; then
+            notify "Shift sync cancelled" "Nothing was written."
+            return
+        fi
+        touch "$STATE/shifts-confirmed-once"
+    fi
+    if ! applied=$(shifts_writer apply "$deletes" "$roster"); then
+        notify "Shift sync failed" "The calendar write didn't finish. Run it again: it only adds what's missing." critical
+        return
+    fi
+    save shifts "$applied" "$(changes "$applied")"
+    notify "Shifts synced" "$(changes "$applied")"
+}
+
+run_shifts() {
+    local out roster
+    preflight_chrome || return 0
+    notify "Syncing shifts" "Reading your roster in Chrome. About two minutes."
+    if ! out=$(cd "$STATE" && claude_run "$(allow mcp__claude-in-chrome)" --chrome --tools "" \
+        --json-schema "$(roster_schema)" -- "/eecs-shifts-read
+Roster URL: $(conf .roster.url)
+Sign-in hint: $(conf .roster.sso_hint)
+Today: $(today). Read $(conf .roster.days_ahead) days ahead."); then
+        fail shifts "$out"
+        return
+    fi
+    roster=$(structured <<<"$out")
+    case $(jq -r '.status // "error"' <<<"$roster") in
+    ok) ;;
+    needs_login)
+        notify "The roster needs you" "Log in to the roster site in Chrome, then press ALT+I w again. Nothing was written." critical
+        return
+        ;;
+    *)
+        notify "Shift sync failed" "$(jq -r '.message // "The reader returned an error."' <<<"$roster") Nothing was written." critical
+        return
+        ;;
+    esac
+    if ! roster=$(validate_roster <<<"$roster"); then
+        notify "Shift sync stopped" "The roster data failed the safety checks, so nothing was written." critical
+        return
+    fi
+    write_shifts "$roster" allowed if-risky
+}
+
+paste_ask() {
+    local text
+    text=$(rofi -dmenu -p "shifts" -mesg "Type your shifts, e.g.  thu 4-11:30pm, fri 5pm-1am, sun 11am-7pm" -l 0 </dev/null) || return 0
+    [ -n "$text" ] && launch shifts-paste "$text"
+}
+
+# Typed shifts are parsed by a small model, always confirmed, and never
+# delete anything
+run_shifts_paste() {
+    local text=$1 out roster
+    notify "Reading your shifts" "Turning that into calendar events."
+    if ! out=$(cd "$STATE" && claude_run "$(allow)" --model "$(conf .models.parse)" --no-chrome --tools "" \
+        --json-schema "$(roster_schema)" -- "Today is $(today), a $(TZ=$(conf .timezone) date +%A). Turn this list of work shifts into JSON: \"$text\"
+Dates are the next occurrence of each weekday on or after today. Times are 24-hour HH:MM. When am or pm is missing, pick the reading that makes a 4 to 10 hour shift, preferring afternoon and evening starts. status is ok, range_start and range_end are the first and last shift dates, role is empty, and message repeats the shifts back in plain words."); then
+        fail shifts-paste "$out"
+        return
+    fi
+    if ! roster=$(structured <<<"$out" | validate_roster); then
+        notify "Couldn't read those shifts" "Try again with am/pm, like: thu 4pm-11:30pm" critical
+        return
+    fi
+    write_shifts "$roster" forbidden always
+}
+
+########
+## Coach
+
+run_coach() {
+    local out
+    if ! out=$(cd "$STATE" && claude_run "$(allow RemoteTrigger ToolSearch)" --model "$(conf .models.parse)" \
+        --no-chrome --tools "RemoteTrigger,ToolSearch" -- "Use the RemoteTrigger tool: action run, trigger_id $(conf .coach_trigger_id). Reply with one line: started, or the error."); then
+        fail coach "$out"
+        return
+    fi
+    save coach "$out" "$(jq -r '.result // ""' <<<"$out")"
+    notify "Coach started" "It rebuilds tomorrow onward in the EECS Plan calendar and sends its brief to your phone in a few minutes."
+}
+
+#######
+## Menu
+
+last() { rofi -e "$(cat "$STATE/last.txt" 2>/dev/null || echo "No agent has run yet.")"; }
+
+menu() {
+    local pick
+    pick=$(printf '%s\n' "plan my day" "sync work shifts" "type in shifts" "coach: rebuild the week" "last result" |
+        rofi -dmenu -i -no-custom -p "agents") || return 0
+    case $pick in
+    "plan my day") preflight && plan_ask ;;
+    "sync work shifts") preflight && launch shifts ;;
+    "type in shifts") preflight && paste_ask ;;
+    "coach: rebuild the week") preflight && launch coach ;;
+    "last result") last ;;
+    esac
+}
+
+mkdir -p "$STATE"
+case ${1:-menu} in
+plan) preflight && plan_ask ;;
+shifts) preflight && launch shifts ;;
+shifts-paste) preflight && paste_ask ;;
+coach) preflight && launch coach ;;
+menu) menu ;;
+last) last ;;
+_run)
+    shift
+    name=$1
+    shift
+    case $name in
+    plan) run_plan "$@" ;;
+    shifts) run_shifts ;;
+    shifts-paste) run_shifts_paste "$@" ;;
+    coach) run_coach ;;
+    esac
+    ;;
+*)
+    sed -n '3,10p' "$SELF" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
