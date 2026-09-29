@@ -183,6 +183,10 @@ validate_roster() {
             and (.start | clock) and (.end | clock)))
         | .range_start = ([.range_start, $today] | max)
         | .shifts |= map(select(.date >= $today))
+        # Page text must not reach the writer as instructions: keep the role
+        # short and plain, and drop the free-text message
+        | .shifts |= map(.role = ((.role // "") | gsub("[^A-Za-z0-9 &/().-]"; "") | .[0:30]))
+        | del(.message)
     ' | grep .
 }
 
