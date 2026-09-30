@@ -38,14 +38,17 @@ notify() { notify-send -a eecs -u "${3:-normal}" "$1" "$2"; }
 allow() { jq -cn '{permissions: {allow: $ARGS.positional}}' --args "$@"; }
 
 # claude_run <settings> [flags...] -- <prompt>: one headless run, JSON on
-# stdout. Anything that would ask for permission is denied instead.
+# stdout. Anything that would ask for permission is denied instead. Fails
+# when the run reports an error (a usage limit still exits 0).
 claude_run() {
-    local settings=$1 args=()
+    local settings=$1 args=() out
     shift
     while [ "$1" != "--" ]; do args+=("$1"); shift; done
-    claude -p --model "$(conf .models.default)" --no-session-persistence \
+    out=$(claude -p --model "$(conf .models.default)" --no-session-persistence \
         --output-format json --permission-mode dontAsk --permission-prompts none \
-        --settings "$settings" "${args[@]}" "$2"
+        --settings "$settings" "${args[@]}" "$2") || { printf '%s\n' "$out"; return 1; }
+    printf '%s\n' "$out"
+    jq -e '.is_error != true' >/dev/null 2>&1 <<<"$out"
 }
 
 # The object a --json-schema run returned
