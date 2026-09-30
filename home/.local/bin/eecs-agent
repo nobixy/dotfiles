@@ -44,9 +44,11 @@ claude_run() {
     local settings=$1 args=() out
     shift
     while [ "$1" != "--" ]; do args+=("$1"); shift; done
+    # --settings takes exactly one value, so it goes last: a list option like
+    # --tools right before the prompt would swallow it as one more tool
     out=$(claude -p --model "$(conf .models.default)" --no-session-persistence \
         --output-format json --permission-mode dontAsk --permission-prompts none \
-        --settings "$settings" "${args[@]}" "$2") || { printf '%s\n' "$out"; return 1; }
+        "${args[@]}" --settings "$settings" "$2") || { printf '%s\n' "$out"; return 1; }
     printf '%s\n' "$out"
     jq -e '.is_error != true' >/dev/null 2>&1 <<<"$out"
 }
