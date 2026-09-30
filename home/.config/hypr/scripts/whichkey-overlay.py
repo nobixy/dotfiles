@@ -181,7 +181,7 @@ OBSIDIAN = [
 APPS = {
     "kitty": [("tmux · C-a then", tmux_keys), ("Neovim · Space then", nvim_groups)],
     "google-chrome": [("Chrome", CHROME)],
-    "obsidian": [("Obsidian", OBSIDIAN)],
+    "md.obsidian.Obsidian": [("Obsidian", OBSIDIAN)],
 }
 
 

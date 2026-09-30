@@ -12,10 +12,13 @@
   eecs-record setup      write the OBS profile, scene collection and websocket
                          settings (quit OBS first; existing files are backed up)
 
-The overlay is an HTML page OBS shows over the screen. It reads data.js, which
-this script rewrites every 20 s from the vault: the North Star, the current
-blocks, today's focus and checklist (the log's Morning section) and the hours
-logged. Nothing private goes on it: no shifts, no calendar.
+The overlay is a transparent PNG drawn with Cairo/Pango and shown by an OBS
+image source, which reloads it whenever the file changes. While recording it
+is redrawn every 10 s from the vault: the session time, the North Star, the
+current blocks, today's focus and checklist (the log's Morning section) and
+the hours logged. Nothing private goes on it: no shifts, no calendar.
+(OBS's browser source would do, but Arch's plugin currently fails to start
+CEF: "CEF failed to initialize. Exit code: 28".)
 
 Recordings land in ~/Videos/Study as MKV (safe if OBS crashes) and OBS remuxes
 them to MP4 for YouTube. The websocket password lives in
@@ -45,8 +48,7 @@ CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", HOME + "/.config"), "eec
 STATE = os.path.join(os.environ.get("XDG_STATE_HOME", HOME + "/.local/state"), "eecs/record")
 SESSION = os.path.join(STATE, "session.json")
 WATCH_PID = os.path.join(STATE, "watch.pid")
-OVERLAY = os.path.join(STATE, "overlay.html")
-DATA = os.path.join(STATE, "data.js")
+OVERLAY = os.path.join(STATE, "overlay.png")
 VIDEOS = os.path.join(HOME, "Videos/Study")
 OBS_DIR = os.path.join(HOME, ".config/obs-studio")
 
@@ -129,6 +131,10 @@ class OBS:
                 return message["d"].get("responseData", {})
 
     def close(self):
+        try:
+            self._send_frame(0x88, struct.pack(">H", 1000))  # close, normal
+        except OSError:
+            pass
         self.sock.close()
 
     def _fill(self):
@@ -144,8 +150,10 @@ class OBS:
         return out
 
     def _send_json(self, obj):
-        payload = json.dumps(obj).encode()
-        head = bytes([0x81])  # FIN, text
+        self._send_frame(0x81, json.dumps(obj).encode())  # FIN, text
+
+    def _send_frame(self, first_byte, payload):
+        head = bytes([first_byte])
         n = len(payload)
         if n < 126:
             head += bytes([0x80 | n])
@@ -266,24 +274,122 @@ def overlay_data():
     }
 
 
+# Colours match the rice (Catppuccin Mocha + cyan/green)
+BG, BORDER = (0.067, 0.067, 0.106, 0.9), (0.2, 0.8, 1.0, 0.35)
+TEXT, DIM, CYAN, GREEN, RED = "#cdd6f4", "#7f849c", "#33ccff", "#00ff99", "#f38ba8"
+FONT = "FiraCode Nerd Font"
+PANEL_W, PANEL_TOP, PAD = 470, 56, 20
+
+
+def render(data, path):
+    """Draw the goals panel and the webcam frame onto a transparent canvas."""
+    import gi
+    gi.require_version("Pango", "1.0")
+    gi.require_version("PangoCairo", "1.0")
+    import cairo
+    from gi.repository import Pango, PangoCairo
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, WIDTH, HEIGHT)
+    cr = cairo.Context(surface)
+    width = PANEL_W - 2 * PAD
+
+    def block(markup, size, colour, bold=False, gap=0, indent=0):
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(Pango.FontDescription(f"{FONT} {'Bold ' if bold else ''}{size}px"))
+        layout.set_width(width * Pango.SCALE)
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        if indent:
+            layout.set_indent(-indent * Pango.SCALE)  # hanging indent for checklist lines
+        layout.set_markup(f'<span foreground="{colour}">{markup}</span>', -1)
+        return layout, gap
+
+    esc = markup_escape
+    rows = []
+    elapsed = ""
+    if data.get("started"):
+        minutes = int((time.time() * 1000 - data["started"]) // 60000)
+        elapsed = f"{minutes // 60}h {minutes % 60:02d}m"
+    rows.append(("rec", elapsed))
+    rows.append(block(esc(data["date"]), 15, DIM))
+    rows.append(block("NORTH STAR", 13, DIM, True, 14))
+    rows.append(block(esc(data["goal"]), 14, DIM, gap=2))
+    rows.append(block("NOW", 13, DIM, True, 14))
+    rows.append(block(esc(data["now"]), 17, CYAN, True, 2))
+    if data["next"]:
+        rows.append(block("next: " + esc(data["next"]), 14, DIM))
+    if data["focus"] or data["one"] or data["tasks"]:
+        rows.append(block("TODAY", 13, DIM, True, 14))
+        if data["focus"]:
+            rows.append(block(esc(data["focus"]), 16, TEXT, gap=2))
+        if data["one"]:
+            rows.append(block("The one thing: " + esc(data["one"]), 16, GREEN, gap=2))
+        for task in data["tasks"]:
+            box = f'<span foreground="{GREEN}">☑</span>' if task["done"] else f'<span foreground="{CYAN}">☐</span>'
+            text = f'<s>{esc(task["text"])}</s>' if task["done"] else esc(task["text"])
+            rows.append(block(f"{box}  {text}", 15, DIM if task["done"] else TEXT, gap=4, indent=27))
+    rows.append(block(esc(data["hours"] + " h logged today" if data["hours"] else "No log yet today"), 14, DIM, gap=14))
+
+    # Measure, then draw the panel behind the text
+    rec = block("● REC", 17, RED, True)[0]
+    timer = block(elapsed or "0h 00m", 26, TEXT, True)[0]
+    height = PAD + timer.get_pixel_size()[1]
+    for row in rows[1:]:
+        height += row[1] + row[0].get_pixel_size()[1]
+    height += PAD
+    x = WIDTH - MARGIN - PANEL_W
+
+    def rounded(x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -1.5708, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+        cr.arc(x + r, y + h - r, r, 1.5708, 3.1416)
+        cr.arc(x + r, y + r, r, 3.1416, 4.7124)
+        cr.close_path()
+
+    rounded(x, PANEL_TOP, PANEL_W, height, 16)
+    cr.set_source_rgba(*BG)
+    cr.fill_preserve()
+    cr.set_source_rgba(*BORDER)
+    cr.set_line_width(2)
+    cr.stroke()
+
+    y = PANEL_TOP + PAD
+    th = timer.get_pixel_size()[1]
+    cr.move_to(x + PAD, y + th - rec.get_pixel_size()[1] - 2)
+    PangoCairo.show_layout(cr, rec)
+    cr.move_to(x + PANEL_W - PAD - timer.get_pixel_size()[0], y)
+    PangoCairo.show_layout(cr, timer)
+    y += th
+    for layout, gap in rows[1:]:
+        y += gap
+        cr.move_to(x + PAD, y)
+        PangoCairo.show_layout(cr, layout)
+        y += layout.get_pixel_size()[1]
+
+    # Frame around the webcam
+    cr.rectangle(WIDTH - MARGIN - CAM_W + 1, HEIGHT - MARGIN - CAM_H + 1, CAM_W - 2, CAM_H - 2)
+    cr.set_source_rgba(0.2, 0.8, 1.0, 1.0)
+    cr.stroke()
+
+    tmp = path + ".tmp.png"
+    surface.write_to_png(tmp)
+    os.replace(tmp, path)  # OBS never sees a half-written file
+
+
+def markup_escape(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def write_overlay():
     os.makedirs(STATE, exist_ok=True)
-    tmp = DATA + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("window.EECS = " + json.dumps(overlay_data(), ensure_ascii=False) + ";\n")
-    os.replace(tmp, DATA)
-    page = OVERLAY_HTML.replace("{{CAM_W}}", str(CAM_W)).replace("{{CAM_H}}", str(CAM_H)) \
-        .replace("{{MARGIN}}", str(MARGIN))
-    if read(OVERLAY) != page:
-        with open(OVERLAY, "w", encoding="utf-8") as f:
-            f.write(page)
+    render(overlay_data(), OVERLAY)
 
 
 def watch():
-    """Keep data.js fresh while a session is open."""
+    """Keep the overlay current while a session is open."""
     while os.path.exists(SESSION):
         write_overlay()
-        time.sleep(20)
+        time.sleep(10)
     write_overlay()
 
 
@@ -307,7 +413,17 @@ def dnd(paused):
     subprocess.run(["pkill", "-RTMIN+8", "waybar"], check=False)
 
 
+def tidy_recordings():
+    """OBS keeps the MKV after remuxing it to MP4: drop the MKV once its MP4
+    is complete (at least as big), so every session isn't stored twice."""
+    for mkv in glob.glob(os.path.join(VIDEOS, "*.mkv")):
+        mp4 = mkv[:-4] + ".mp4"
+        if os.path.exists(mp4) and os.path.getsize(mp4) >= os.path.getsize(mkv):
+            os.remove(mkv)
+
+
 def start():
+    tidy_recordings()
     if recording():
         notify("Already recording", "ALT+I r again to stop.", "low")
         return 0
@@ -506,15 +622,22 @@ def setup():
     })
 
     # Scene collection: screen, webcam bottom right, overlay on top
-    screen = source("pipewire-screen-capture-source", "Screen (LG)", {"ShowCursor": True})
+    # Keep the screen OBS was told to share (the portal's restore token)
+    path = os.path.join(OBS_DIR, "basic/scenes", SLUG + ".json")
+    token = ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            token = next((src["settings"].get("RestoreToken", "") for src in json.load(f)["sources"]
+                          if src["id"] == "pipewire-screen-capture-source"), "")
+    except (OSError, ValueError, KeyError):
+        pass
+    screen = source("pipewire-screen-capture-source", "Screen (LG)", {"ShowCursor": True, "RestoreToken": token})
     cam = source("v4l2_input", "Webcam", {
         "device_id": WEBCAM if os.path.exists(WEBCAM) else "/dev/video0",
         "input": 0, "pixelformat": 1196444237,  # MJPG
-        "resolution": (1280 << 16) | 720, "framerate": (1 << 16) | 30, "auto_reset": True})
-    overlay = source("browser_source", "Goals overlay", {
-        "is_local_file": True, "local_file": OVERLAY, "width": WIDTH, "height": HEIGHT,
-        "reroute_audio": False, "shutdown": False, "restart_when_active": True,
-        "css": "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"})
+        "resolution": (1280 << 16) | 720, "framerate": (1 << 16) | 30,
+        "auto_reset": False})  # resetting after 5 silent frames never lets this camera start
+    overlay = source("image_source", "Goals overlay", {"file": OVERLAY, "unload": False})
     desktop = source("pulse_output_capture", "Desktop Audio", {"device_id": "default"})
     mic = source("pulse_input_capture", "Mic (Yeti)", {"device_id": MIC}, filters=[
         {"id": "noise_suppress_filter_v2", "versioned_id": "noise_suppress_filter_v2",
@@ -534,7 +657,6 @@ def setup():
         "sources": [scene, screen, cam, overlay],
         "DesktopAudioDevice1": desktop, "AuxAudioDevice1": mic,
     }
-    path = os.path.join(OBS_DIR, "basic/scenes", SLUG + ".json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     backup(path)
     with open(path, "w", encoding="utf-8") as f:
@@ -549,80 +671,6 @@ def setup():
         })
     print(f"OBS is set up: profile and scene collection \"{NAME}\", recordings in {VIDEOS}.")
     return 0
-
-
-OVERLAY_HTML = r"""<!doctype html>
-<html><head><meta charset="utf-8">
-<!-- Written by eecs-record; data.js is rewritten every 20 s while recording -->
-<style>
-  :root { --bg: rgba(17, 17, 27, 0.9); --text: #cdd6f4; --dim: #7f849c; --cyan: #33ccff;
-          --green: #00ff99; --red: #f38ba8; --line: rgba(51, 204, 255, 0.35); }
-  html, body { margin: 0; background: transparent; overflow: hidden; }
-  body { font-family: "FiraCode Nerd Font", "Fira Code", monospace; color: var(--text); }
-  .panel { position: absolute; top: 56px; right: {{MARGIN}}px; width: 470px; box-sizing: border-box;
-           background: var(--bg); border: 2px solid var(--line); border-radius: 16px;
-           padding: 18px 22px; font-size: 17px; line-height: 1.4; }
-  .row { display: flex; justify-content: space-between; align-items: baseline; }
-  .rec { color: var(--red); font-weight: bold; letter-spacing: 1px; }
-  .timer { font-size: 26px; font-weight: bold; color: var(--text); }
-  .date { color: var(--dim); font-size: 15px; }
-  h2 { margin: 16px 0 4px; font-size: 13px; letter-spacing: 2px; color: var(--dim); font-weight: bold; }
-  .goal { font-size: 14px; color: var(--dim); }
-  .now { color: var(--cyan); font-weight: bold; }
-  .next { color: var(--dim); font-size: 14px; }
-  .one { color: var(--green); }
-  ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: 15px; }
-  li { padding: 2px 0 2px 26px; text-indent: -26px; }
-  li.done { color: var(--dim); text-decoration: line-through; }
-  li::before { content: "☐  "; color: var(--cyan); }
-  li.done::before { content: "☑  "; color: var(--green); }
-  .hours { margin-top: 14px; color: var(--dim); font-size: 14px; }
-  .cam { position: absolute; right: {{MARGIN}}px; bottom: {{MARGIN}}px; width: {{CAM_W}}px; height: {{CAM_H}}px;
-         box-sizing: border-box; border: 2px solid var(--cyan); border-radius: 4px; }
-</style></head>
-<body>
-<div class="panel">
-  <div class="row"><span class="rec">● REC</span><span class="timer" id="timer">0:00:00</span></div>
-  <div class="date" id="date"></div>
-  <h2>NORTH STAR</h2><div class="goal" id="goal"></div>
-  <h2>NOW</h2><div class="now" id="now"></div><div class="next" id="next"></div>
-  <div id="today"><h2>TODAY</h2><div id="focus"></div><div class="one" id="one"></div><ul id="tasks"></ul></div>
-  <div class="hours" id="hours"></div>
-</div>
-<div class="cam"></div>
-<script>
-  function text(id, value) { document.getElementById(id).textContent = value || ""; }
-  function render() {
-    const d = window.EECS || {};
-    text("date", d.date); text("goal", d.goal); text("now", d.now);
-    text("next", d.next ? "next: " + d.next : "");
-    text("focus", d.focus); text("one", d.one ? "The one thing: " + d.one : "");
-    const ul = document.getElementById("tasks"); ul.innerHTML = "";
-    for (const t of d.tasks || []) {
-      const li = document.createElement("li"); li.textContent = t.text;
-      if (t.done) li.className = "done"; ul.appendChild(li);
-    }
-    document.getElementById("today").style.display = (d.focus || d.one || (d.tasks || []).length) ? "" : "none";
-    text("hours", d.hours === "" ? "No log yet today" : d.hours + " h logged today");
-  }
-  function tick() {
-    const d = window.EECS || {};
-    const s = d.started ? Math.max(0, Math.floor((Date.now() - d.started) / 1000)) : 0;
-    const pad = n => String(n).padStart(2, "0");
-    text("timer", Math.floor(s / 3600) + ":" + pad(Math.floor(s / 60) % 60) + ":" + pad(s % 60));
-  }
-  // Reload data.js (a script tag works from file://, fetch doesn't)
-  function load() {
-    const s = document.createElement("script");
-    s.src = "data.js?t=" + Date.now();
-    s.onload = () => { render(); s.remove(); };
-    s.onerror = () => s.remove();
-    document.head.appendChild(s);
-  }
-  load(); setInterval(load, 10000); setInterval(tick, 1000); tick();
-</script>
-</body></html>
-"""
 
 
 def main(args):
