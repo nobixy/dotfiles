@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""eecs-record: record a study session with OBS (screen, webcam, goals overlay).
+
+  eecs-record toggle     start or stop recording (ALT+I r, the Waybar REC dot)
+  eecs-record start      start: do not disturb on, overlay live, OBS recording
+  eecs-record stop       stop, restore notifications, say where the file went
+  eecs-record status     exit 0 while OBS is recording
+  eecs-record waybar     JSON for the Waybar REC indicator
+  eecs-record overlay    rewrite the overlay's data once (--watch: keep doing it)
+  eecs-record upload     open YouTube's upload page; the newest recording's path
+                         goes on the clipboard (Ctrl+L in the file picker, paste)
+  eecs-record setup      write the OBS profile, scene collection and websocket
+                         settings (quit OBS first; existing files are backed up)
+
+The overlay is an HTML page OBS shows over the screen. It reads data.js, which
+this script rewrites every 20 s from the vault: the North Star, the current
+blocks, today's focus and checklist (the log's Morning section) and the hours
+logged. Nothing private goes on it: no shifts, no calendar.
+
+Recordings land in ~/Videos/Study as MKV (safe if OBS crashes) and OBS remuxes
+them to MP4 for YouTube. The websocket password lives in
+~/.config/eecs/config.json (obs_password), outside this repo.
+"""
+
+import base64
+import configparser
+import datetime
+import glob
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+import uuid
+
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", HOME + "/.config"), "eecs/config.json")
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME", HOME + "/.local/state"), "eecs/record")
+SESSION = os.path.join(STATE, "session.json")
+WATCH_PID = os.path.join(STATE, "watch.pid")
+OVERLAY = os.path.join(STATE, "overlay.html")
+DATA = os.path.join(STATE, "data.js")
+VIDEOS = os.path.join(HOME, "Videos/Study")
+OBS_DIR = os.path.join(HOME, ".config/obs-studio")
+
+NAME = "EECS Study"  # OBS profile and scene collection
+SLUG = "EECS_Study"  # their directory / file name
+SCENE = "Study Session"
+PORT = 4455
+
+# Canvas: the LG (DP-1) at 2560x1440. The webcam sits bottom right; the
+# overlay draws its frame there, so the two must agree.
+WIDTH, HEIGHT = 2560, 1440
+CAM_W, CAM_H, MARGIN = 480, 270, 32
+MIC = "alsa_input.usb-Logitech_Yeti_Orb_2525GVN00H68-00.mono-fallback"
+WEBCAM = "/dev/v4l/by-id/usb-SunplusIT_Inc_USB_2.0_Camera_20201211V0-video-index0"
+
+
+def conf():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def notify(title, body="", urgency="normal"):
+    subprocess.run(["notify-send", "-a", "eecs", "-u", urgency, title, body], check=False)
+
+
+def waybar_refresh():
+    subprocess.run(["pkill", "-RTMIN+9", "waybar"], check=False)
+
+
+# --- OBS websocket (v5), just enough of RFC 6455 for request/response ------
+
+
+class OBSError(Exception):
+    pass
+
+
+class OBS:
+    def __init__(self, password, timeout=2.0):
+        try:
+            self.sock = socket.create_connection(("127.0.0.1", PORT), timeout=timeout)
+        except OSError as e:
+            raise OBSError("OBS is not running (or its websocket server is off)") from e
+        self.buf = b""
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((
+            f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nUpgrade: websocket\r\n"
+            f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+            "Sec-WebSocket-Protocol: obswebsocket.json\r\n\r\n").encode())
+        while b"\r\n\r\n" not in self.buf:
+            self._fill()
+        head, self.buf = self.buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n")[0]:
+            raise OBSError("OBS refused the websocket upgrade")
+
+        hello = self._recv_json()["d"]
+        identify = {"rpcVersion": 1, "eventSubscriptions": 0}
+        if "authentication" in hello:
+            if not password:
+                raise OBSError("OBS wants a password: run eecs-record setup")
+            auth = hello["authentication"]
+            secret = base64.b64encode(hashlib.sha256((password + auth["salt"]).encode()).digest())
+            identify["authentication"] = base64.b64encode(
+                hashlib.sha256(secret + auth["challenge"].encode()).digest()).decode()
+        self._send_json({"op": 1, "d": identify})
+        if self._recv_json().get("op") != 2:
+            raise OBSError("OBS did not accept the websocket password")
+
+    def request(self, kind, data=None):
+        rid = uuid.uuid4().hex
+        self._send_json({"op": 6, "d": {"requestType": kind, "requestId": rid, "requestData": data or {}}})
+        while True:
+            message = self._recv_json()
+            if message.get("op") == 7 and message["d"].get("requestId") == rid:
+                status = message["d"]["requestStatus"]
+                if not status.get("result"):
+                    raise OBSError(f"{kind}: {status.get('comment') or status.get('code')}")
+                return message["d"].get("responseData", {})
+
+    def close(self):
+        self.sock.close()
+
+    def _fill(self):
+        chunk = self.sock.recv(65536)
+        if not chunk:
+            raise OBSError("OBS closed the connection")
+        self.buf += chunk
+
+    def _take(self, n):
+        while len(self.buf) < n:
+            self._fill()
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def _send_json(self, obj):
+        payload = json.dumps(obj).encode()
+        head = bytes([0x81])  # FIN, text
+        n = len(payload)
+        if n < 126:
+            head += bytes([0x80 | n])
+        elif n < 65536:
+            head += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else:
+            head += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        mask = os.urandom(4)  # clients must mask
+        self.sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def _recv_json(self):
+        message = b""
+        while True:
+            b0, b1 = self._take(2)
+            opcode, n = b0 & 0x0F, b1 & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._take(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._take(8))[0]
+            mask = self._take(4) if b1 & 0x80 else None
+            payload = self._take(n)
+            if mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode == 8:
+                raise OBSError("OBS closed the websocket" + (f": {payload[2:].decode()}" if len(payload) > 2 else ""))
+            if opcode == 9:  # ping
+                self.sock.sendall(bytes([0x8A, 0x80]) + os.urandom(4))
+                continue
+            if opcode in (0, 1, 2):
+                message += payload
+                if b0 & 0x80:
+                    return json.loads(message)
+
+
+def obs_call(kind, data=None):
+    obs = OBS(conf().get("obs_password", ""))
+    try:
+        return obs.request(kind, data)
+    finally:
+        obs.close()
+
+
+def recording():
+    try:
+        return bool(obs_call("GetRecordStatus").get("outputActive"))
+    except (OBSError, OSError, ValueError):
+        return False
+
+
+def obs_running():
+    return subprocess.run(["pgrep", "-x", "obs"], stdout=subprocess.DEVNULL, check=False).returncode == 0
+
+
+# --- The overlay -------------------------------------------------------------
+
+
+def plain(text):
+    """Markdown -> plain text: [[target|alias]] -> alias, **bold** -> bold."""
+    text = re.sub(r"\[\[([^\]|]*)\|([^\]]*)\]\]", r"\2", text)
+    text = re.sub(r"\[\[([^\]]*)\]\]", r"\1", text)
+    text = re.sub(r"\*\*|__|`", "", text)
+    return text.strip()
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def overlay_data():
+    vault = conf().get("vault") or os.path.join(HOME, "The Noblett Repository")
+    tz = conf().get("timezone")
+    if tz:
+        os.environ["TZ"] = tz
+        time.tzset()
+    today = datetime.date.today().isoformat()
+
+    dashboard = read(os.path.join(vault, "00 - Dashboard.md"))
+    goal = re.search(r"^\*\*Goal:\*\*\s*(.+)$", dashboard, re.M)
+    now_line = re.search(r"^\*\*Now:\*\*\s*(.+)$", dashboard, re.M)
+    now, following = "", ""
+    if now_line:
+        parts = now_line.group(1).split("·")
+        now = plain(parts[0].replace("Phase −1 →", "Phase −1:"))
+        nxt = [p for p in parts if "Next block" in p]
+        following = plain(nxt[0].split(":", 1)[-1]) if nxt else ""
+
+    log = read(os.path.join(vault, "10 - Daily Log", today + ".md"))
+    hours = re.search(r"^study_hours:\s*([\d.]+)", log, re.M)
+    focus = re.search(r"^- \*\*Focus:\*\*\s*(.+)$", log, re.M)
+    one = re.search(r"^- \*\*The one thing:\*\*\s*(.+)$", log, re.M)
+    morning = log.split("## Morning", 1)[1] if "## Morning" in log else ""
+    morning = re.split(r"^(?:## |- \*\*Active Block)", morning, maxsplit=1, flags=re.M)[0]
+    tasks = [{"done": box.lower() == "x", "text": plain(text)}
+             for box, text in re.findall(r"^- \[( |x|X)\]\s*(.+)$", morning, re.M)]
+
+    session = {}
+    try:
+        with open(SESSION, encoding="utf-8") as f:
+            session = json.load(f)
+    except (OSError, ValueError):
+        pass
+
+    return {
+        "goal": plain(goal.group(1)) if goal else "",
+        "now": now,
+        "next": following,
+        "focus": plain(focus.group(1)) if focus else "",
+        "one": plain(one.group(1)) if one else "",
+        "tasks": tasks,
+        "hours": hours.group(1) if hours else ("0" if log else ""),
+        "date": datetime.date.today().strftime("%a %b %-d, %Y"),
+        "started": session.get("started"),  # ms since the epoch
+        "updated": int(time.time() * 1000),
+    }
+
+
+def write_overlay():
+    os.makedirs(STATE, exist_ok=True)
+    tmp = DATA + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("window.EECS = " + json.dumps(overlay_data(), ensure_ascii=False) + ";\n")
+    os.replace(tmp, DATA)
+    page = OVERLAY_HTML.replace("{{CAM_W}}", str(CAM_W)).replace("{{CAM_H}}", str(CAM_H)) \
+        .replace("{{MARGIN}}", str(MARGIN))
+    if read(OVERLAY) != page:
+        with open(OVERLAY, "w", encoding="utf-8") as f:
+            f.write(page)
+
+
+def watch():
+    """Keep data.js fresh while a session is open."""
+    while os.path.exists(SESSION):
+        write_overlay()
+        time.sleep(20)
+    write_overlay()
+
+
+def stop_watch():
+    try:
+        with open(WATCH_PID, encoding="utf-8") as f:
+            os.kill(int(f.read().strip()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.remove(WATCH_PID)
+    except OSError:
+        pass
+
+
+# --- Start / stop ---------------------------------------------------------------
+
+
+def dnd(paused):
+    subprocess.run(["dunstctl", "set-paused", "true" if paused else "false"], check=False)
+    subprocess.run(["pkill", "-RTMIN+8", "waybar"], check=False)
+
+
+def start():
+    if recording():
+        notify("Already recording", "ALT+I r again to stop.", "low")
+        return 0
+    os.makedirs(STATE, exist_ok=True)
+    os.makedirs(VIDEOS, exist_ok=True)
+    was_paused = subprocess.run(["dunstctl", "is-paused"], capture_output=True, text=True,
+                                check=False).stdout.strip() == "true"
+    with open(SESSION, "w", encoding="utf-8") as f:
+        json.dump({"started": int(time.time() * 1000), "dnd_was_paused": was_paused}, f)
+    write_overlay()
+    stop_watch()
+    watcher = subprocess.Popen([sys.argv[0], "overlay", "--watch"], start_new_session=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(WATCH_PID, "w", encoding="utf-8") as f:
+        f.write(str(watcher.pid))
+
+    if obs_running():
+        try:
+            obs_call("SetCurrentProgramScene", {"sceneName": SCENE})
+            obs_call("StartRecord")
+        except OBSError as e:
+            return fail_start(str(e))
+    else:
+        if not os.path.exists(os.path.join(OBS_DIR, "basic/scenes", SLUG + ".json")):
+            return fail_start("OBS isn't set up yet: run eecs-record setup")
+        subprocess.Popen(["obs", "--collection", NAME, "--profile", NAME, "--scene", SCENE,
+                          "--startrecording", "--minimize-to-tray", "--disable-shutdown-check"],
+                         cwd=HOME, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # OBS takes a few seconds to start (longer the first time: pick the LG
+    # in the screen-share dialog and tick "remember")
+    for _ in range(90):
+        if recording():
+            break
+        time.sleep(1)
+    else:
+        return fail_start("OBS didn't start recording within 90 s")
+    notify("Recording your study session", "Notifications are paused. ALT+I r to stop.")
+    dnd(True)
+    waybar_refresh()
+    return 0
+
+
+def fail_start(reason):
+    end_session()
+    notify("Recording didn't start", reason, "critical")
+    return 1
+
+
+def end_session():
+    session = {}
+    try:
+        with open(SESSION, encoding="utf-8") as f:
+            session = json.load(f)
+        os.remove(SESSION)
+    except (OSError, ValueError):
+        pass
+    stop_watch()
+    if session:  # put do not disturb back the way it was before the session
+        dnd(session.get("dnd_was_paused", False))
+    waybar_refresh()
+    return session
+
+
+def stop():
+    path = ""
+    try:
+        path = obs_call("StopRecord").get("outputPath", "")
+    except OBSError as e:
+        if recording():
+            notify("Couldn't stop recording", str(e), "critical")
+            return 1
+    session = end_session()
+    minutes = ""
+    if session.get("started"):
+        minutes = f"{round((time.time() * 1000 - session['started']) / 60000)} min · "
+    name = os.path.basename(path).rsplit(".", 1)[0] + ".mp4" if path else "the recording"
+    notify("Study session saved", f"{minutes}{name} in ~/Videos/Study\nALT+I u to upload it to YouTube.")
+    return 0
+
+
+def toggle():
+    return stop() if recording() else start()
+
+
+def upload():
+    videos = sorted(glob.glob(os.path.join(VIDEOS, "*.mp4")) or glob.glob(os.path.join(VIDEOS, "*.mkv")),
+                    key=os.path.getmtime)
+    if videos:
+        subprocess.run(["wl-copy", videos[-1]], check=False)
+        notify("Newest recording's path is on the clipboard",
+               f"{os.path.basename(videos[-1])}\nIn the file picker: Ctrl+L, paste, Enter. "
+               "Set visibility to Private or Unlisted.")
+    else:
+        notify("No recordings yet", "ALT+I r starts one.", "low")
+    subprocess.Popen(["google-chrome-stable", "https://www.youtube.com/upload"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
+def waybar():
+    if recording():
+        started = ""
+        try:
+            with open(SESSION, encoding="utf-8") as f:
+                ms = time.time() * 1000 - json.load(f)["started"]
+            started = f" since {int(ms // 3600000)}h{int(ms // 60000 % 60):02d}m"
+        except (OSError, ValueError, KeyError):
+            pass
+        print(json.dumps({"text": "● REC", "class": "on",
+                          "tooltip": f"Recording{started}\nClick to stop"}))
+    else:
+        print(json.dumps({"text": "", "class": "off", "tooltip": ""}))
+    return 0
+
+
+# --- OBS setup -------------------------------------------------------------------
+
+
+def source(kind, name, settings, **extra):
+    return {"id": kind, "versioned_id": kind, "name": name, "uuid": str(uuid.uuid4()),
+            "settings": settings, "enabled": True, "muted": False, "volume": 1.0, "balance": 0.5,
+            "mixers": 255, "sync": 0, "flags": 0, "monitoring_type": 0, "hotkeys": {},
+            "private_settings": {}, "filters": extra.get("filters", [])}
+
+
+def item(src, item_id, x, y, w, h):
+    return {"name": src["name"], "source_uuid": src["uuid"], "id": item_id, "visible": True,
+            "locked": True, "rot": 0.0, "pos": {"x": x, "y": y}, "scale": {"x": 1.0, "y": 1.0},
+            "align": 5, "bounds_type": 2, "bounds_align": 0, "bounds": {"x": w, "y": h},
+            "crop_left": 0, "crop_top": 0, "crop_right": 0, "crop_bottom": 0,
+            "scale_filter": "disable", "blend_method": "default", "blend_type": "normal",
+            "private_settings": {}}
+
+
+def backup(path):
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
+
+
+def write_ini(path, sections):
+    backup(path)
+    ini = configparser.ConfigParser(interpolation=None)
+    ini.optionxform = str  # OBS keys are case sensitive
+    if os.path.exists(path):
+        ini.read(path, encoding="utf-8-sig")
+    for section, values in sections.items():
+        if not ini.has_section(section):
+            ini.add_section(section)
+        for key, value in values.items():
+            ini.set(section, key, str(value))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        ini.write(f, space_around_delimiters=False)
+
+
+def setup():
+    if obs_running():
+        print("Quit OBS first: it rewrites its settings when it exits.", file=sys.stderr)
+        return 1
+    if not shutil.which("obs"):
+        print("OBS isn't installed: sudo pacman -S obs-studio obs-studio-plugin-browser", file=sys.stderr)
+        return 1
+    os.makedirs(VIDEOS, exist_ok=True)
+    write_overlay()
+
+    # Websocket password, kept in the private eecs config
+    settings = conf()
+    password = settings.get("obs_password") or secrets.token_urlsafe(18)
+    if settings.get("obs_password") != password:
+        settings["obs_password"] = password
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        with open(CONFIG, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+        os.chmod(CONFIG, 0o600)
+    ws = os.path.join(OBS_DIR, "plugin_config/obs-websocket/config.json")
+    os.makedirs(os.path.dirname(ws), exist_ok=True)
+    backup(ws)
+    with open(ws, "w", encoding="utf-8") as f:
+        json.dump({"alerts_enabled": False, "auth_required": True, "first_load": False,
+                   "server_enabled": True, "server_password": password, "server_port": PORT}, f, indent=2)
+    os.chmod(ws, 0o600)
+
+    # Profile: 1440p30 NVENC, MKV remuxed to MP4, into ~/Videos/Study
+    write_ini(os.path.join(OBS_DIR, "basic/profiles", SLUG, "basic.ini"), {
+        "General": {"Name": NAME},
+        "Output": {"Mode": "Simple", "FilenameFormatting": "study-%CCYY-%MM-%DD_%hh-%mm"},
+        "SimpleOutput": {"FilePath": VIDEOS, "RecFormat2": "mkv", "RecQuality": "Stream",
+                         "StreamEncoder": "nvenc", "RecEncoder": "nvenc", "VBitrate": 8000,
+                         "ABitrate": 160, "FileNameWithoutSpace": "true", "RecRB": "false"},
+        "Video": {"BaseCX": WIDTH, "BaseCY": HEIGHT, "OutputCX": WIDTH, "OutputCY": HEIGHT,
+                  "FPSType": 0, "FPSCommon": 30, "AutoRemux": "true"},
+        "Audio": {"SampleRate": 48000, "ChannelSetup": "Stereo"},
+    })
+
+    # Scene collection: screen, webcam bottom right, overlay on top
+    screen = source("pipewire-screen-capture-source", "Screen (LG)", {"ShowCursor": True})
+    cam = source("v4l2_input", "Webcam", {
+        "device_id": WEBCAM if os.path.exists(WEBCAM) else "/dev/video0",
+        "input": 0, "pixelformat": 1196444237,  # MJPG
+        "resolution": (1280 << 16) | 720, "framerate": (1 << 16) | 30, "auto_reset": True})
+    overlay = source("browser_source", "Goals overlay", {
+        "is_local_file": True, "local_file": OVERLAY, "width": WIDTH, "height": HEIGHT,
+        "reroute_audio": False, "shutdown": False, "restart_when_active": True,
+        "css": "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"})
+    desktop = source("pulse_output_capture", "Desktop Audio", {"device_id": "default"})
+    mic = source("pulse_input_capture", "Mic (Yeti)", {"device_id": MIC}, filters=[
+        {"id": "noise_suppress_filter_v2", "versioned_id": "noise_suppress_filter_v2",
+         "name": "Noise suppression", "uuid": str(uuid.uuid4()), "enabled": True,
+         "settings": {"method": "rnnoise"}}])
+    scene = source("scene", SCENE, {
+        "id_counter": 3, "custom_size": False,
+        "items": [
+            item(screen, 1, 0, 0, WIDTH, HEIGHT),
+            item(cam, 2, WIDTH - CAM_W - MARGIN, HEIGHT - CAM_H - MARGIN, CAM_W, CAM_H),
+            item(overlay, 3, 0, 0, WIDTH, HEIGHT),
+        ]})
+    collection = {
+        "name": NAME, "current_scene": SCENE, "current_program_scene": SCENE,
+        "scene_order": [{"name": SCENE}], "current_transition": "Fade", "transition_duration": 300,
+        "transitions": [], "groups": [], "quick_transitions": [], "saved_projectors": [],
+        "sources": [scene, screen, cam, overlay],
+        "DesktopAudioDevice1": desktop, "AuxAudioDevice1": mic,
+    }
+    path = os.path.join(OBS_DIR, "basic/scenes", SLUG + ".json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup(path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(collection, f, indent=4)
+
+    # Open on this profile and collection; skip the first-run wizard
+    for ini in ("user.ini", "global.ini"):
+        write_ini(os.path.join(OBS_DIR, ini), {
+            "General": {"FirstRun": "true"},
+            "Basic": {"Profile": NAME, "ProfileDir": SLUG, "SceneCollection": NAME,
+                      "SceneCollectionFile": SLUG},
+        })
+    print(f"OBS is set up: profile and scene collection \"{NAME}\", recordings in {VIDEOS}.")
+    return 0
+
+
+OVERLAY_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- Written by eecs-record; data.js is rewritten every 20 s while recording -->
+<style>
+  :root { --bg: rgba(17, 17, 27, 0.9); --text: #cdd6f4; --dim: #7f849c; --cyan: #33ccff;
+          --green: #00ff99; --red: #f38ba8; --line: rgba(51, 204, 255, 0.35); }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  body { font-family: "FiraCode Nerd Font", "Fira Code", monospace; color: var(--text); }
+  .panel { position: absolute; top: 56px; right: {{MARGIN}}px; width: 470px; box-sizing: border-box;
+           background: var(--bg); border: 2px solid var(--line); border-radius: 16px;
+           padding: 18px 22px; font-size: 17px; line-height: 1.4; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; }
+  .rec { color: var(--red); font-weight: bold; letter-spacing: 1px; }
+  .timer { font-size: 26px; font-weight: bold; color: var(--text); }
+  .date { color: var(--dim); font-size: 15px; }
+  h2 { margin: 16px 0 4px; font-size: 13px; letter-spacing: 2px; color: var(--dim); font-weight: bold; }
+  .goal { font-size: 14px; color: var(--dim); }
+  .now { color: var(--cyan); font-weight: bold; }
+  .next { color: var(--dim); font-size: 14px; }
+  .one { color: var(--green); }
+  ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: 15px; }
+  li { padding: 2px 0 2px 26px; text-indent: -26px; }
+  li.done { color: var(--dim); text-decoration: line-through; }
+  li::before { content: "☐  "; color: var(--cyan); }
+  li.done::before { content: "☑  "; color: var(--green); }
+  .hours { margin-top: 14px; color: var(--dim); font-size: 14px; }
+  .cam { position: absolute; right: {{MARGIN}}px; bottom: {{MARGIN}}px; width: {{CAM_W}}px; height: {{CAM_H}}px;
+         box-sizing: border-box; border: 2px solid var(--cyan); border-radius: 4px; }
+</style></head>
+<body>
+<div class="panel">
+  <div class="row"><span class="rec">● REC</span><span class="timer" id="timer">0:00:00</span></div>
+  <div class="date" id="date"></div>
+  <h2>NORTH STAR</h2><div class="goal" id="goal"></div>
+  <h2>NOW</h2><div class="now" id="now"></div><div class="next" id="next"></div>
+  <div id="today"><h2>TODAY</h2><div id="focus"></div><div class="one" id="one"></div><ul id="tasks"></ul></div>
+  <div class="hours" id="hours"></div>
+</div>
+<div class="cam"></div>
+<script>
+  function text(id, value) { document.getElementById(id).textContent = value || ""; }
+  function render() {
+    const d = window.EECS || {};
+    text("date", d.date); text("goal", d.goal); text("now", d.now);
+    text("next", d.next ? "next: " + d.next : "");
+    text("focus", d.focus); text("one", d.one ? "The one thing: " + d.one : "");
+    const ul = document.getElementById("tasks"); ul.innerHTML = "";
+    for (const t of d.tasks || []) {
+      const li = document.createElement("li"); li.textContent = t.text;
+      if (t.done) li.className = "done"; ul.appendChild(li);
+    }
+    document.getElementById("today").style.display = (d.focus || d.one || (d.tasks || []).length) ? "" : "none";
+    text("hours", d.hours === "" ? "No log yet today" : d.hours + " h logged today");
+  }
+  function tick() {
+    const d = window.EECS || {};
+    const s = d.started ? Math.max(0, Math.floor((Date.now() - d.started) / 1000)) : 0;
+    const pad = n => String(n).padStart(2, "0");
+    text("timer", Math.floor(s / 3600) + ":" + pad(Math.floor(s / 60) % 60) + ":" + pad(s % 60));
+  }
+  // Reload data.js (a script tag works from file://, fetch doesn't)
+  function load() {
+    const s = document.createElement("script");
+    s.src = "data.js?t=" + Date.now();
+    s.onload = () => { render(); s.remove(); };
+    s.onerror = () => s.remove();
+    document.head.appendChild(s);
+  }
+  load(); setInterval(load, 10000); setInterval(tick, 1000); tick();
+</script>
+</body></html>
+"""
+
+
+def main(args):
+    command = args[0] if args else "toggle"
+    if command == "overlay":
+        if "--watch" in args:
+            watch()
+        else:
+            write_overlay()
+        return 0
+    commands = {"toggle": toggle, "start": start, "stop": stop, "upload": upload,
+                "waybar": waybar, "setup": setup,
+                "status": lambda: 0 if recording() else 1}
+    if command in commands:
+        return commands[command]()
+    print(__doc__.strip())
+    return 0 if command in ("-h", "--help", "help") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

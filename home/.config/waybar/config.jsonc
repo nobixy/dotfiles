@@ -13,7 +13,7 @@
         "height": 30,
         "modules-left": ["ext/workspaces", "hyprland/submap"],
         "modules-center": ["hyprland/window"],
-        "modules-right": ["custom/dnd", "pulseaudio", "network", "clock", "tray"],
+        "modules-right": ["custom/rec", "custom/dnd", "pulseaudio", "network", "clock", "tray"],
 
         "ext/workspaces": {
             "format": "{name}",
@@ -38,6 +38,15 @@
         },
 
         // Do not disturb (ALT+T, then d). Refreshed by `pkill -RTMIN+8 waybar`
+        // Red while OBS records a study session (eecs-record); click to stop
+        "custom/rec": {
+            "exec": "~/.local/bin/eecs-record waybar",
+            "return-type": "json",
+            "interval": 5,
+            "signal": 9,
+            "on-click": "~/.local/bin/eecs-record toggle"
+        },
+
         "custom/dnd": {
             "exec": "~/.config/waybar/scripts/dnd.sh",
             "return-type": "json",

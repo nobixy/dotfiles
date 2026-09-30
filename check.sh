@@ -33,11 +33,13 @@ check "git config" git_config
 check "tmux config" tmux_config
 check "Neovim starts without errors" nvim --headless +qa
 
-scripts=("$DOTFILES"/*.sh "$H"/.config/hypr/scripts/*.sh "$H"/.config/waybar/scripts/*.sh "$H"/.local/bin/eecs*)
+scripts=("$DOTFILES"/*.sh "$H"/.config/hypr/scripts/*.sh "$H"/.config/waybar/scripts/*.sh "$H"/.local/bin/eecs "$H"/.local/bin/eecs-agent)
 for script in "${scripts[@]}"; do
     check "bash -n ${script#"$DOTFILES"/}" bash -n "$script"
 done
-check "python syntax whichkey-overlay.py" python_syntax "$H/.config/hypr/scripts/whichkey-overlay.py"
+for script in "$H/.config/hypr/scripts/whichkey-overlay.py" "$H/.local/bin/eecs-record"; do
+    check "python syntax ${script#"$H"/}" python_syntax "$script"
+done
 
 # Lint the scripts; Neovim's Mason tools include a copy of the linter if the
 # system has none

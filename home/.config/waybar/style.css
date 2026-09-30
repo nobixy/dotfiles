@@ -64,6 +64,7 @@ tooltip {
     font-weight: bold;
 }
 
+#custom-rec,
 #custom-dnd,
 #pulseaudio,
 #network,
@@ -73,6 +74,7 @@ tooltip {
 }
 
 #custom-dnd.on { color: @yellow; }
+#custom-rec.on { color: @red; font-weight: bold; }
 #pulseaudio.muted { color: @overlay0; }
 #network.disconnected { color: @red; }
 

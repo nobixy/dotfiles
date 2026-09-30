@@ -229,14 +229,19 @@ group("R", "rename/restart", {
 
 -- <leader>i: study, mirrored by <leader>i in Neovim. The agent buttons run
 -- in the background and report back through a notification
--- (~/.local/bin/eecs-agent); l, n and o open the vault (~/.local/bin/eecs).
+-- (~/.local/bin/eecs-agent); l, n and o open the vault (~/.local/bin/eecs);
+-- r records the session with OBS (~/.local/bin/eecs-record).
 -- The status line under the title is `eecs status`.
 local agent = v.home .. "/.local/bin/eecs-agent"
 local eecs  = v.home .. "/.local/bin/eecs"
+local rec   = v.home .. "/.local/bin/eecs-record"
 group("I", "study", {
     { "l", exec(eecs .. " open log"),      "today's log" },
     { "n", exec(eecs .. " open block"),    "current block note" },
     { "b", exec(eecs .. " open bench"),    "Study Bench" },
+    { "r", exec(rec .. " toggle"),         "record study session (OBS)",
+        { state = rec .. " status" } },
+    { "u", exec(rec .. " upload"),         "upload a recording to YouTube" },
     { "o", sub("open", {
         { "d", exec(eecs .. " open dashboard"), "dashboard" },
         { "c", exec(eecs .. " open calendar"),  "calendar note" },
