@@ -29,3 +29,45 @@ map("n", "<leader>u", function()
   vim.cmd.packadd("nvim.undotree")
   require("undotree").open()
 end, { desc = "Undo tree" })
+
+-- Study, mirroring ALT+I in Hyprland (~/.local/bin/eecs and eecs-agent).
+-- Notes open in this Neovim; the agents run in the background and answer
+-- with a notification.
+local bin = vim.fn.expand("~/.local/bin/")
+
+local function study_note(thing)
+  return function()
+    local paths = vim.fn.systemlist({ bin .. "eecs", "path", thing })
+    if vim.v.shell_error ~= 0 or #paths == 0 then
+      vim.notify("eecs path " .. thing .. " found nothing", vim.log.levels.WARN)
+      return
+    end
+    local function edit(path)
+      if path then vim.cmd.edit(vim.fn.fnameescape(path)) end
+    end
+    if #paths == 1 then
+      return edit(paths[1])
+    end
+    vim.ui.select(paths, {
+      prompt = "Open",
+      format_item = function(path) return vim.fn.fnamemodify(path, ":t:r") end,
+    }, edit)
+  end
+end
+
+local function study_run(...)
+  local cmd = { ... }
+  cmd[1] = bin .. cmd[1]
+  return function() vim.system(cmd, { detach = true }) end
+end
+
+map("n", "<leader>il", study_note("log"), { desc = "Today's log" })
+map("n", "<leader>in", study_note("block"), { desc = "Current block note" })
+map("n", "<leader>id", study_note("dashboard"), { desc = "Dashboard" })
+map("n", "<leader>ik", study_note("checklist"), { desc = "Degree checklist" })
+map("n", "<leader>ib", study_run("eecs", "open", "bench"), { desc = "Study Bench (Chrome)" })
+map("n", "<leader>ip", study_run("eecs-agent", "plan"), { desc = "Plan my day" })
+map("n", "<leader>iw", study_run("eecs-agent", "shifts"), { desc = "Sync work shifts" })
+map("n", "<leader>ii", study_run("eecs-agent", "shifts-paste"), { desc = "Type in shifts" })
+map("n", "<leader>ic", study_run("eecs-agent", "coach"), { desc = "Coach: rebuild the week" })
+map("n", "<leader>ia", study_run("eecs-agent", "menu"), { desc = "All agents" })

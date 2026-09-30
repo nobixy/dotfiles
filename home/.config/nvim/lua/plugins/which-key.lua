@@ -10,6 +10,7 @@ return {
       { "<leader>e", group = "explorer" },
       { "<leader>f", group = "find" },
       { "<leader>h", group = "git hunk", mode = { "n", "v" } },
+      { "<leader>i", group = "study" },
       { "<leader>m", group = "format" },
       { "<leader>n", group = "search" },
       { "<leader>p", group = "project" },

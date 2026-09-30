@@ -2,6 +2,11 @@
 --   * hold the leader (ALT) on its own for a moment and an overlay lists
 --     everything it can do; it closes when you let go or press a key
 --   * open a leader group (ALT+F, ALT+S, ...) and it lists that group's keys
+--   * groups can hold groups (ALT+I, o -> "study › open"), and a sticky group
+--     stays open after each key, like which-key.nvim's hydra mode
+--   * an item can show a live on/off badge (state) and a group a status line;
+--     the overlay runs those shell checks, so the compositor never waits
+--   * the ALT overview adds the focused app's own keys (tmux, Neovim, ...)
 --
 -- keybinds.lua registers what to show through section()/add()/record()/group().
 -- The overlay itself is scripts/whichkey-overlay.py (never takes keyboard
@@ -13,6 +18,7 @@ local M = {}
 
 M.delay_ms = 500 -- hold the leader this long before the overlay appears
 M.group_timeout_ms = 5000 -- an open group gives up after this long
+M.sticky_timeout_ms = 10000 -- a sticky group, this long after its last key
 
 local mod = v.mainMod
 local sections = {}
@@ -29,20 +35,8 @@ local KEYS = {
     ["mouse:272"] = "left drag", ["mouse:273"] = "right drag",
 }
 
-function M.label(chord)
-    local mods, key = {}, nil
-    for part in chord:gmatch("[^+%s]+") do
-        if SYMBOLS[part] then
-            mods[part] = true
-        else
-            key = part
-        end
-    end
-    if not key or not mods[mod] then
-        return nil -- not reachable from the leader
-    end
-    mods[mod] = nil
-
+-- "SHIFT + h" -> "H", "CTRL + l" -> "⌃l", "bracketleft" -> "["
+local function pretty(mods, key)
     if mods.SHIFT and key == "slash" then
         mods.SHIFT, key = nil, "?"
     elseif mods.SHIFT and #key == 1 and key:match("%a") then
@@ -60,6 +54,34 @@ function M.label(chord)
         end
     end
     return prefix .. key
+end
+
+local function parse(chord)
+    local mods, key = {}, nil
+    for part in chord:gmatch("[^+%s]+") do
+        if SYMBOLS[part] then
+            mods[part] = true
+        else
+            key = part
+        end
+    end
+    return mods, key
+end
+
+-- A chord as seen from the leader, or nil if the leader isn't part of it
+function M.label(chord)
+    local mods, key = parse(chord)
+    if not key or not mods[mod] then
+        return nil
+    end
+    mods[mod] = nil
+    return pretty(mods, key)
+end
+
+-- A key inside a group (no leader needed)
+function M.key_label(chord)
+    local mods, key = parse(chord)
+    return key and pretty(mods, key) or chord
 end
 
 ---------------------------------------------------------------------------
@@ -90,9 +112,20 @@ function M.record(chord, desc)
     end
 end
 
-function M.group(key, name, items)
-    groups[name] = { key = key, items = items }
+-- A leader group. spec: {
+--   key = "I",                 opened by mod+key (top-level groups only)
+--   title = "ALT+I  study",    overlay title; "  " separates the key part
+--   items = { { key, desc, state }, ... }   state: optional shell check
+--   sticky = true,             keys don't close it (esc or idle does)
+--   status = "eecs status",    optional shell command shown under the title
+-- }
+function M.group(name, spec)
+    groups[name] = spec
     table.insert(group_order, name)
+end
+
+function M.is_sticky(name)
+    return groups[name] ~= nil and groups[name].sticky == true
 end
 
 function M.is_group(name)
@@ -111,7 +144,9 @@ local function write()
 
     line("section", "Leader groups")
     for _, name in ipairs(group_order) do
-        line("entry", M.label(mod .. " + " .. groups[name].key), "+" .. name)
+        if groups[name].key then
+            line("entry", M.label(mod .. " + " .. groups[name].key), "+" .. name)
+        end
     end
     for _, s in ipairs(sections) do
         line("section", s.name)
@@ -121,9 +156,9 @@ local function write()
     end
     for _, name in ipairs(group_order) do
         local g = groups[name]
-        line("group", name, mod .. "+" .. g.key .. "  " .. name)
+        line("group", name, g.title, g.sticky and "1" or "0", g.status or "")
         for _, item in ipairs(g.items) do
-            line("item", name, item[1], item[3])
+            line("item", name, M.key_label(item[1]), item[2], item[3] or "")
         end
     end
     f:close()
@@ -146,15 +181,25 @@ for _, code in ipairs(MOD_KEYCODES[mod] or {}) do
 end
 
 local held, arm_timer, group_timer = false, nil, nil
+local arm_group -- defined below
 local visible -- "root", a group name, or nil
 
-local function send(args)
-    hl.exec_cmd(v.scripts .. "/whichkey.sh " .. args)
+local function quote(s)
+    return "'" .. tostring(s):gsub("[\t\n]", " "):gsub("'", "'\\''") .. "'"
+end
+
+local function send(...)
+    local args = {}
+    for i, a in ipairs({ ... }) do
+        args[i] = quote(a)
+    end
+    hl.exec_cmd(v.scripts .. "/whichkey.sh " .. table.concat(args, " "))
 end
 
 local function show(view)
     local m = hl.get_active_monitor()
-    send(string.format("show %s %d %d", view, m and m.x or 0, m and m.y or 0))
+    local w = view == "root" and hl.get_active_window() or nil
+    send("show", view, m and m.x or 0, m and m.y or 0, w and w.class or "", w and w.title or "")
     visible = view
 end
 
@@ -203,6 +248,8 @@ function M.on_key(keycode, _, state)
                 hide()
             end
         end
+    elseif state == 1 and not MODIFIER[keycode] and M.is_sticky(hl.get_current_submap()) then
+        arm_group(hl.get_current_submap()) -- still in use: restart the idle timeout
     elseif state == 1 and not MODIFIER[keycode] then
         -- A chord is being typed: cancel/close the overview. Closing waits a
         -- moment, so a group opened by this key can take over instead.
@@ -218,17 +265,23 @@ function M.on_key(keycode, _, state)
     end
 end
 
+-- Close the group if it's still open after its timeout
+function arm_group(name)
+    stop(group_timer)
+    group_timer = hl.timer(function()
+        if hl.get_current_submap() == name then
+            hl.dispatch(hl.dsp.submap("reset"))
+        end
+    end, { timeout = M.is_sticky(name) and M.sticky_timeout_ms or M.group_timeout_ms, type = "oneshot" })
+end
+
 -- keybinds.submap handler: a leader group opened or closed
 function M.on_submap(name)
     stop(group_timer)
     group_timer = nil
     if groups[name] then
         show(name)
-        group_timer = hl.timer(function()
-            if hl.get_current_submap() == name then
-                hl.dispatch(hl.dsp.submap("reset"))
-            end
-        end, { timeout = M.group_timeout_ms, type = "oneshot" })
+        arm_group(name)
     elseif visible and visible ~= "root" then
         hide()
     end

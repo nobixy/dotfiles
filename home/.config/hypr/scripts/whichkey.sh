@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Client for the which-key overlay (whichkey-overlay.py); starts it if needed.
-# usage: whichkey.sh show <view> <monitor-x> <monitor-y>
+# usage: whichkey.sh show <view> <monitor-x> <monitor-y> [<window-class> <window-title>]
 #        whichkey.sh hide
+# Fields travel tab-separated, so views and titles may contain spaces.
 fifo="${XDG_RUNTIME_DIR:-/tmp}/hypr-whichkey.fifo"
 
 send() {
+    local IFS=$'\t'
     # A FIFO with no reader would block forever; give up after 0.3 s
     [ -p "$fifo" ] && timeout 0.3 sh -c 'printf "%s\n" "$1" > "$2"' _ "$*" "$fifo"
 }

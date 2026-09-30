@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# eecs: jump into the study from anywhere (ALT+I in Hyprland, <leader>i in
+# Neovim). The agent buttons are a separate script, eecs-agent.
+#
+#   eecs status          one line for the which-key overlay: the current
+#                        blocks and today's logged hours
+#   eecs path <thing>    print the file, creating today's log if needed
+#   eecs open <thing>    open it: notes in Neovim (kitty), the bench in Chrome
+#
+#   things: log        today's daily log (made from the template if missing)
+#           block      the current block note(s), from the Dashboard's Now line
+#           dashboard  calendar  checklist
+#           bench      the Study Bench page     (open only)
+#           vault      the vault in Obsidian    (open only)
+#           terminal   a shell in the vault     (open only)
+#
+# Settings come from ~/.config/eecs/config.json (vault, timezone,
+# study_bench_url), which is not in this repo.
+set -euo pipefail
+
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/eecs/config.json
+
+conf() { jq -r "$1 // empty" "$CONFIG"; }
+VAULT=$(conf .vault)
+VAULT=${VAULT:-$HOME/The Noblett Repository}
+TZ=$(conf .timezone)
+export TZ=${TZ:-America/New_York}
+
+today() { date +%F; }
+uri() { jq -rn --arg s "$1" '$s | @uri'; }
+die() { notify-send -a eecs -u low "eecs" "$1" 2>/dev/null || true; echo "eecs: $1" >&2; exit 1; }
+
+log_path() { printf '%s/10 - Daily Log/%s.md\n' "$VAULT" "$(today)"; }
+
+# Today's log, made from the vault's template the first time
+ensure_log() {
+    local log template
+    log=$(log_path)
+    template="$VAULT/08 - Templates/Daily Log Entry Template.md"
+    if [ ! -e "$log" ] && [ -e "$template" ]; then
+        sed "s/{{date}}/$(today)/g" "$template" >"$log"
+    fi
+    printf '%s\n' "$log"
+}
+
+# The blocks linked on the Dashboard's **Now:** line, as file paths
+blocks() {
+    local name
+    grep -m1 '^\*\*Now:\*\*' "$VAULT/00 - Dashboard.md" |
+        sed 's/\*\*Next block.*//' |
+        grep -o '\[\[[^]|]*' | sed 's/^\[\[//' |
+        while IFS= read -r name; do
+            find "$VAULT/01 - Curriculum" -name "$name.md" -print -quit
+        done
+}
+
+# frontmatter <file> <key>: one scalar from the YAML frontmatter
+frontmatter() { awk -v k="$2" 'NR == 1 && /^---/ { f = 1; next } f && /^---/ { exit } f && $1 == k":" { sub(/^[^:]*:[ \t]*/, ""); gsub(/"/, ""); print; exit }' "$1"; }
+
+status() {
+    local names="" hours="0" log
+    while IFS= read -r block; do
+        [ -n "$block" ] && names+="${names:+ + }$(basename "$block" .md | cut -d' ' -f1)"
+    done < <(blocks)
+    log=$(log_path)
+    if [ -e "$log" ]; then
+        hours=$(frontmatter "$log" study_hours)
+        printf 'Now %s · %s h logged today\n' "${names:-?}" "${hours:-0}"
+    else
+        printf 'Now %s · no log yet today (l makes one)\n' "${names:-?}"
+    fi
+}
+
+path() {
+    case ${1:-} in
+    log) ensure_log ;;
+    block) blocks ;;
+    dashboard) printf '%s\n' "$VAULT/00 - Dashboard.md" ;;
+    calendar) printf '%s\n' "$VAULT/Calendar.md" ;;
+    checklist) printf '%s\n' "$VAULT/Checklist.md" ;;
+    *) die "unknown thing: ${1:-} (see eecs --help)" ;;
+    esac
+}
+
+# Open files in Neovim in a new kitty window, working directory the vault
+edit() { [ $# -gt 0 ] || die "nothing to open"; setsid -f kitty --directory "$VAULT" nvim -O "$@" >/dev/null 2>&1; }
+
+open_thing() {
+    local url files=()
+    case ${1:-} in
+    bench)
+        url=$(conf .study_bench_url)
+        [ -n "$url" ] || die "set study_bench_url in $CONFIG"
+        setsid -f google-chrome-stable --app="$url" >/dev/null 2>&1
+        ;;
+    vault) setsid -f xdg-open "obsidian://open?vault=$(uri "$(basename "$VAULT")")" >/dev/null 2>&1 ;;
+    terminal) setsid -f kitty --directory "$VAULT" >/dev/null 2>&1 ;;
+    *)
+        mapfile -t files < <(path "$1")
+        edit "${files[@]}"
+        ;;
+    esac
+}
+
+case ${1:-} in
+status) status ;;
+path) path "${2:-}" ;;
+open) open_thing "${2:-}" ;;
+-h | --help | "") sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+*) die "unknown command: $1 (see eecs --help)" ;;
+esac

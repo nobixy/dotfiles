@@ -73,8 +73,14 @@ On different hardware, check these:
 ## Keys
 
 - **Desktop:** hold ALT for the which-key overlay, or press ALT+? for a searchable list.
-  ALT+F, S, B, T and R open leader groups (find, split, buffer, toggle, rename/restart),
-  like `<leader>f` etc. in Neovim.
+  The overlay also lists the focused app's own keys (tmux and Neovim in kitty, Chrome,
+  Obsidian). ALT+F, S, B, T, R and I open leader groups (find, split, buffer, toggle,
+  rename/restart, study), like `<leader>f` etc. in Neovim; groups can nest (ALT+I, o) and
+  show live on/off badges (ALT+T). ALT+M is window mode, a sticky group: h/j/k/l, H/J/K/L
+  and ⌃h/j/k/l work without ALT until you press esc.
+- **Study:** ALT+I (or `<leader>i` in Neovim) opens today's log, the current block note
+  and the Study Bench, and runs the study agents. `eecs --help` covers the command line;
+  its settings live in `~/.config/eecs/config.json`, outside this repo.
 - **Neovim:** press Space and wait for which-key.
 - **Shell:** `y` opens yazi and follows it to where you quit; `man` pages open in Neovim.
 

@@ -31,21 +31,26 @@ def chord(b):
 binds = json.load(sys.stdin)
 
 # Leader groups: the opener is described "+<submap>" (see keybinds.lua), and
-# the keys inside the group are listed as "<opener>, <key>"
+# the keys inside the group are listed as "<opener>, <key>". A group inside a
+# group is the submap "<parent> › <name>", opened by "+<name>" in the parent.
 openers = {b["description"][1:]: chord(b) for b in binds
            if not b["submap"] and b["description"].startswith("+")}
+for _ in range(3):  # nesting depth
+    for b in binds:
+        if b["submap"] in openers and b["description"].startswith("+"):
+            openers[b["submap"] + " › " + b["description"][1:]] = openers[b["submap"]] + ", " + b["key"]
 
 rows, seen = [], set()
 for b in binds:
     if not b.get("has_description"):
         continue
+    if b["description"].startswith("+"):
+        continue  # a group opener: listed through its keys
     if b["submap"]:
         if b["submap"] not in openers:
             continue
-        keys = openers[b["submap"]] + ", " + b["key"]
+        keys = openers[b["submap"]] + ", " + chord(b)
         desc = b["submap"] + ": " + b["description"]
-    elif b["description"].startswith("+"):
-        continue  # listed through its keys
     else:
         keys, desc = chord(b), b["description"]
     if (keys, desc) not in seen:
