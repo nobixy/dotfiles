@@ -72,6 +72,8 @@ noto-fonts-emoji
 npm
 obsidian
 obsidian-icon-theme
+obs-studio
+obs-studio-plugin-browser
 opencode
 openssh
 pacman-contrib
