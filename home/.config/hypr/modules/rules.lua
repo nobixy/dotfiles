@@ -44,6 +44,16 @@ hl.window_rule({
     float = true,
 })
 
+-- The guy's chat (ALT+A g): a floating terminal on the right
+hl.window_rule({
+    name  = "float-guy",
+    match = { class = "^guy$" },
+
+    float = true,
+    size  = { "monitor_w*0.35", "monitor_h*0.7" },
+    move  = { "monitor_w*0.65-20", "monitor_h*0.15" },
+})
+
 -- Browser picture-in-picture: small, pinned to all workspaces, bottom right
 hl.window_rule({
     name  = "pip",

@@ -15,5 +15,8 @@ hl.on("hyprland.start", function()
     if v.have("hypridle")   then hl.exec_cmd("hypridle")   end
     if v.have("hyprsunset") then hl.exec_cmd("hyprsunset") end
 
+    -- ActivityWatch (window + AFK log on :5600); the guy's activity worker reads it
+    if v.have("awatcher")   then hl.exec_cmd("awatcher --no-tray") end
+
     session.restore()
 end)

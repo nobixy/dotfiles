@@ -74,6 +74,7 @@ obsidian
 obsidian-icon-theme
 obs-studio
 obs-studio-plugin-browser
+ollama-cuda
 opencode
 openssh
 pacman-contrib

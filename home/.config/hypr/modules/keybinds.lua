@@ -256,6 +256,17 @@ group("I", "study", {
     { "a", exec(agent .. " menu"),         "all agents" },
 }, { status = eecs .. " status" })
 
+-- <leader>a: assistant, the local buddy on Ollama (~/.local/bin/guy). Chat
+-- opens a floating kitty (class "guy"); the rest answer by notification.
+local guy = v.home .. "/.local/bin/guy"
+group("A", "assistant", {
+    { "g", exec("kitty --class guy -e " .. guy .. " chat"),           "chat with your guy" },
+    { "s", exec("kitty --class guy -e " .. guy .. " chat --think"),   "chat, think harder (9b)" },
+    { "a", exec("q=$(rofi -dmenu -p 'ask your guy') && [ -n \"$q\" ] && " .. guy .. " ask \"$q\""), "quick question" },
+    { "t", exec(guy .. " today"),                                    "today: desk time summary" },
+    { "w", exec("xdg-open http://127.0.0.1:5600"),                   "ActivityWatch dashboard" },
+}, { status = guy .. " status" })
+
 -- <leader>m: window mode, a sticky group (which-key.nvim's hydra mode):
 -- keep pressing keys without the leader, esc when done.
 local window_mode = {}

@@ -1,4 +1,5 @@
 antigravity
+awatcher-bundle-bin
 claude-code
 claude-code-ui
 google-chrome

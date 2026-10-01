@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""guy: a local buddy, coach and pair programmer on Ollama (ALT+G in Hyprland).
+
+    guy chat [--think]      talk to him in the terminal (ALT+G g)
+    guy ask TEXT            one question, answer as a notification (ALT+G a)
+    guy today [DATE]        run the activity worker, notify the summary (ALT+G t)
+    guy run WORKER [DATE]   run one worker in its sandbox, save its report
+    guy reports             list the saved reports
+    guy status              one line for the which-key overlay
+
+How it is put together:
+  * The orchestrator is the model you chat with. It never touches files,
+    devices or the web. Its only tools are the ones below (list/read reports,
+    run a worker, remember a note), all carried out by this plain script.
+  * Each worker runs under bwrap with an empty $HOME, no devices and only its
+    own scratch dir (~/.local/share/guy/work/<name>). Its one way out is the
+    JSON it prints, which this script checks and saves to reports/. So the
+    orchestrator knows a worker only by its report.
+  * Everything stays in ~/.local/share/guy, never the (public) vault.
+
+Settings: ~/.config/guy/config.json (models, timezone), not in this repo.
+"""
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime, timedelta
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "guy/config.json"
+DATA = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "guy"
+REPORTS, WORK, CHATS = DATA / "reports", DATA / "work", DATA / "chat"
+MEMORY = DATA / "memory.md"
+
+DEFAULTS = {
+    "model": "qwen3.5:4b",          # fits the 8 GB card fully: fast
+    "think_model": "qwen3.5:9b",    # spills to CPU: slower, smarter
+    "ollama": "http://127.0.0.1:11434",
+    "activitywatch": "http://127.0.0.1:5600",
+    "timezone": "America/New_York",
+    "about_me": "",                 # a few lines the orchestrator always knows
+}
+WORKERS = ("activity",)
+MAX_REPORT = 64_000                 # bytes a worker may hand back
+
+
+def config():
+    conf = dict(DEFAULTS)
+    if CONFIG.exists():
+        conf.update(json.loads(CONFIG.read_text()))
+    return conf
+
+
+def http_json(url, body=None, timeout=300):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def ollama_chat(conf, model, messages, tools=None, think=False):
+    body = {"model": model, "messages": messages, "stream": False, "think": think,
+            "keep_alive": "10m", "options": {"num_ctx": 8192}}
+    if tools:
+        body["tools"] = tools
+    return http_json(conf["ollama"] + "/api/chat", body)["message"]
+
+
+def notify(title, body=""):
+    subprocess.run(["notify-send", "-a", "guy", title, body[:900]], check=False)
+
+
+def today(conf):
+    os.environ["TZ"] = conf["timezone"]
+    return datetime.now().astimezone().date().isoformat()
+
+
+# ---------------------------------------------------------------- sandbox
+
+def run_worker(conf, name, date):
+    """Run a worker under bwrap; save and return its report (a dict)."""
+    if name not in WORKERS:
+        raise ValueError(f"unknown worker {name!r} (have: {', '.join(WORKERS)})")
+    scratch = WORK / name
+    scratch.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).resolve()
+    cmd = [
+        "bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+        "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+        "--ro-bind", "/etc/localtime", "/etc/localtime",
+        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        "--tmpfs", str(HOME), "--bind", str(scratch), "/work",
+        "--ro-bind", str(script), "/guy",
+        "--chdir", "/work", "--setenv", "HOME", "/work", "--setenv", "TZ", conf["timezone"],
+        "--", "python3", "/guy", "_worker", name, date,
+    ]
+    p = subprocess.run(cmd, input=json.dumps(conf), capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        raise RuntimeError(f"worker {name} failed: {p.stderr.strip()[-500:]}")
+    if len(p.stdout) > MAX_REPORT:
+        raise RuntimeError(f"worker {name} report too large ({len(p.stdout)} bytes)")
+    report = json.loads(p.stdout)
+    report.update(worker=name, date=date, made=datetime.now().astimezone().isoformat(timespec="seconds"))
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    (REPORTS / f"{name}-{date}.json").write_text(json.dumps(report, indent=1))
+    return report
+
+
+# ---------------------------------------------------------------- workers
+# These run INSIDE the sandbox: they see /work, the network and nothing else.
+# The config arrives on stdin; the report leaves on stdout.
+
+def worker_activity(conf, date):
+    """Desk time from ActivityWatch: totals, timeline, top apps, a summary."""
+    tz = datetime.now().astimezone().tzinfo
+    start = datetime.fromisoformat(date).replace(tzinfo=tz)
+    period = f"{start.isoformat()}/{(start + timedelta(days=1)).isoformat()}"
+    buckets = http_json(conf["activitywatch"] + "/api/0/buckets/")
+    win = next((b for b in buckets if b.startswith("aw-watcher-window")), None)
+    afk = next((b for b in buckets if b.startswith("aw-watcher-afk")), None)
+    if not (win and afk):
+        return {"error": "ActivityWatch has no window/afk buckets yet"}
+    query = [
+        f'afk = flood(query_bucket("{afk}"));',
+        f'win = flood(query_bucket("{win}"));',
+        'win = filter_period_intersect(win, filter_keyvals(afk, "status", ["not-afk"]));',
+        'RETURN = {"events": win, "afk": afk};',
+    ]
+    res = http_json(conf["activitywatch"] + "/api/0/query/", {"timeperiods": [period], "query": query})[0]
+
+    apps, titles, hours = {}, {}, [0.0] * 24
+    first = last = None
+    for e in res["events"]:
+        d = e["duration"]
+        if d < 1:
+            continue
+        t = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).astimezone(tz)
+        first = min(first or t, t)
+        last = max(last or t, t + timedelta(seconds=d))
+        app = e["data"].get("app") or "?"
+        title = (e["data"].get("title") or "").lstrip("◐◑◒◓⠁⠂⠄⡀⢀⠠⠐⠈✳ ")[:80]
+        apps[app] = apps.get(app, 0) + d
+        titles[(app, title)] = titles.get((app, title), 0) + d
+        # spread the event over the hours it covers
+        while d > 0:
+            room = 3600 - (t.minute * 60 + t.second)
+            used = min(d, room)
+            hours[t.hour] += used
+            t += timedelta(seconds=used)
+            d -= used
+    away = []
+    for e in res["afk"]:
+        if e["data"].get("status") == "afk" and e["duration"] >= 20 * 60:
+            t = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).astimezone(tz)
+            away.append({"from": t.strftime("%H:%M"), "minutes": round(e["duration"] / 60)})
+
+    mins = lambda s: round(s / 60)
+    report = {
+        "active_minutes": mins(sum(apps.values())),
+        "first_active": first.strftime("%H:%M") if first else None,
+        "last_active": last.strftime("%H:%M") if last else None,
+        "minutes_by_hour": {f"{h:02d}": mins(s) for h, s in enumerate(hours) if s >= 60},
+        "top_apps": {a: mins(s) for a, s in sorted(apps.items(), key=lambda x: -x[1])[:8] if s >= 60},
+        "top_windows": [{"app": a, "title": ti, "minutes": mins(s)}
+                        for (a, ti), s in sorted(titles.items(), key=lambda x: -x[1])[:12] if s >= 120],
+        "away_blocks": away[:12],
+    }
+    prompt = ("Here is one day of computer activity as JSON. In 3 to 5 plain sentences, say "
+              "when the person was at the desk, what they mostly did (study, coding, entertainment, "
+              "chat, admin), and one pattern worth noticing. Be factual and kind, no advice, no "
+              "judgement.\n\n" + json.dumps(report))
+    try:
+        report["summary"] = ollama_chat(conf, conf["model"], [{"role": "user", "content": prompt}])["content"].strip()
+    except Exception as exc:  # the numbers are still worth a report
+        report["summary"] = f"(no summary: {exc})"
+    return report
+
+
+# ---------------------------------------------------------------- orchestrator
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_reports", "description": "List the saved worker reports (newest first).",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "read_report", "description": "Read one saved report by its name from list_reports.",
+        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {
+        "name": "run_worker",
+        "description": "Run a sandboxed worker for a date and get its fresh report. "
+                       "Workers: activity (desk time, apps and away blocks from ActivityWatch).",
+        "parameters": {"type": "object", "properties": {
+            "worker": {"type": "string", "enum": list(WORKERS)},
+            "date": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["worker", "date"]}}},
+    {"type": "function", "function": {
+        "name": "remember", "description": "Save one short fact about the user for future chats.",
+        "parameters": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}},
+]
+
+
+def call_tool(conf, name, args):
+    if name == "list_reports":
+        return [p.stem for p in sorted(REPORTS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)][:30]
+    if name == "read_report":
+        p = REPORTS / (Path(str(args.get("name", ""))).name.removesuffix(".json") + ".json")
+        return json.loads(p.read_text()) if p.exists() else {"error": "no such report"}
+    if name == "run_worker":
+        date = str(args.get("date") or today(conf))
+        if date in ("today", ""):
+            date = today(conf)
+        return run_worker(conf, str(args.get("worker")), date)
+    if name == "remember":
+        note = " ".join(str(args.get("note", "")).split())[:300]
+        with MEMORY.open("a") as f:
+            f.write(f"- {today(conf)}: {note}\n")
+        return "saved"
+    return {"error": f"unknown tool {name}"}
+
+
+def system_prompt(conf):
+    now = datetime.now().astimezone()
+    memory = MEMORY.read_text().splitlines()[-40:] if MEMORY.exists() else []
+    return f"""You are the user's guy: a friend, coach and pair programmer living on their Linux machine.
+It is {now:%A %Y-%m-%d %H:%M} ({conf['timezone']}).
+
+About them: {conf['about_me'] or 'not filled in yet; ask and remember.'}
+
+How you talk: short, warm, casual, like a good friend. One idea at a time. Never judge a lapse;
+treat it as a missing catch block to patch. Prefer tiny next steps and environment tweaks over
+willpower. For code, be precise and show small snippets.
+
+What you know about their day comes only from worker reports. Use the tools: run_worker for
+fresh data (dates as YYYY-MM-DD), read_report for saved ones. Never invent numbers. Use
+remember for lasting facts they tell you.
+
+Things you remember:
+""" + ("\n".join(memory) or "(nothing yet)")
+
+
+def converse(conf, messages, model, think=False):
+    """Run the tool loop until the model answers; append to messages; return the text."""
+    for _ in range(6):
+        msg = ollama_chat(conf, model, messages, TOOLS, think)
+        messages.append({k: msg[k] for k in ("role", "content", "tool_calls") if msg.get(k)})
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            return msg.get("content", "").strip()
+        for c in calls:
+            fn = c["function"]
+            print(f"  · {fn['name']}({json.dumps(fn.get('arguments') or {})})", file=sys.stderr)
+            try:
+                out = call_tool(conf, fn["name"], fn.get("arguments") or {})
+            except Exception as exc:
+                out = {"error": str(exc)}
+            messages.append({"role": "tool", "tool_name": fn["name"], "content": json.dumps(out)[:12000]})
+    return "(stopped after too many tool calls)"
+
+
+def chat_log(conf):
+    CHATS.mkdir(parents=True, exist_ok=True)
+    return CHATS / f"{today(conf)}.jsonl"
+
+
+def cmd_chat(conf, think):
+    import readline  # noqa: F401  (line editing for input())
+    model = conf["think_model"] if think else conf["model"]
+    log = chat_log(conf)
+    history = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+    print(f"guy ({model}) — ctrl-d to leave. Today's chat continues where it stopped.\n")
+    while True:
+        try:
+            text = input("you › ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not text:
+            continue
+        messages = [{"role": "system", "content": system_prompt(conf)}] + history[-30:]
+        messages.append({"role": "user", "content": text})
+        start = len(messages) - 1
+        try:
+            answer = converse(conf, messages, model, think)
+        except Exception as exc:
+            print(f"guy › (error: {exc})\n")
+            continue
+        print(f"guy › {answer}\n")
+        new = messages[start:]
+        history += new
+        with log.open("a") as f:
+            for m in new:
+                f.write(json.dumps(m) + "\n")
+
+
+def cmd_ask(conf, text):
+    messages = [{"role": "system", "content": system_prompt(conf)}, {"role": "user", "content": text}]
+    answer = converse(conf, messages, conf["model"])
+    with chat_log(conf).open("a") as f:
+        for m in messages[1:]:
+            f.write(json.dumps(m) + "\n")
+    print(answer)
+    notify("guy", answer)
+
+
+def cmd_today(conf, date):
+    try:
+        r = run_worker(conf, "activity", date or today(conf))
+    except Exception as exc:
+        notify("guy: activity failed", str(exc))
+        raise SystemExit(str(exc))
+    head = f"{r.get('active_minutes', 0) // 60}h{r.get('active_minutes', 0) % 60:02d}m at the desk"
+    if r.get("first_active"):
+        head += f", {r['first_active']}–{r['last_active']}"
+    print(head + "\n\n" + r.get("summary", r.get("error", "")))
+    notify(f"guy · {head}", r.get("summary", r.get("error", "")))
+
+
+def cmd_status(conf):
+    try:
+        http_json(conf["ollama"] + "/api/version", timeout=1)
+        up = conf["model"]
+    except Exception:
+        up = "ollama down"
+    p = REPORTS / f"activity-{today(conf)}.json"
+    if p.exists():
+        m = json.loads(p.read_text()).get("active_minutes", 0)
+        print(f"{up} · desk {m // 60}h{m % 60:02d}m (last report)")
+    else:
+        print(f"{up} · no activity report today")
+
+
+def main(argv):
+    conf = config()
+    cmd, rest = (argv[0], argv[1:]) if argv else ("chat", [])
+    if cmd == "_worker":  # inside the sandbox
+        conf = json.load(sys.stdin)
+        fn = {"activity": worker_activity}[rest[0]]
+        json.dump(fn(conf, rest[1]), sys.stdout)
+    elif cmd == "chat":
+        cmd_chat(conf, "--think" in rest)
+    elif cmd == "ask":
+        cmd_ask(conf, " ".join(rest) or sys.stdin.read())
+    elif cmd == "today":
+        cmd_today(conf, rest[0] if rest else None)
+    elif cmd == "run":
+        print(json.dumps(run_worker(conf, rest[0], rest[1] if len(rest) > 1 else today(conf)), indent=1))
+    elif cmd == "reports":
+        for p in sorted(REPORTS.glob("*.json"), reverse=True):
+            print(p.stem)
+    elif cmd == "status":
+        cmd_status(conf)
+    else:
+        print(__doc__)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

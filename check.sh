@@ -37,7 +37,7 @@ scripts=("$DOTFILES"/*.sh "$H"/.config/hypr/scripts/*.sh "$H"/.config/waybar/scr
 for script in "${scripts[@]}"; do
     check "bash -n ${script#"$DOTFILES"/}" bash -n "$script"
 done
-for script in "$H/.config/hypr/scripts/whichkey-overlay.py" "$H/.local/bin/eecs-record"; do
+for script in "$H/.config/hypr/scripts/whichkey-overlay.py" "$H/.local/bin/eecs-record" "$H/.local/bin/guy"; do
     check "python syntax ${script#"$H"/}" python_syntax "$script"
 done
 
