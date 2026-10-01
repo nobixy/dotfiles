@@ -5,7 +5,7 @@ local v       = require("modules.vars")
 local session = require("modules.session")
 
 hl.on("hyprland.start", function()
-    hl.exec_cmd("waybar")
+    hl.exec_cmd("waybar > /tmp/waybar.log 2>&1")                -- log kept so a dead bar can be diagnosed
     hl.exec_cmd("/usr/lib/polkit-kde-authentication-agent-1")   -- password prompts for GUI apps
     hl.exec_cmd("wl-paste --watch cliphist store")               -- clipboard history
     hl.exec_cmd(v.scripts .. "/whichkey-overlay.py")             -- which-key overlay (hold ALT)
