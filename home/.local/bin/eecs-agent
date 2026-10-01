@@ -125,8 +125,11 @@ plan_ask() {
 morning() { awk '/^## Morning/ { f = 1; next } f && /^(## |- \*\*Active Block)/ { exit } f' "$1"; }
 
 run_plan() {
-    local energy=$1 vault settings out summary note action
+    local energy=$1 vault settings out summary note action behavior
     vault=$(conf .vault)
+    # what the local guy saw over the last week (numbers only; empty if
+    # share_digest_with_planner is off in ~/.config/guy/config.json)
+    behavior=$(timeout 90 "$HOME/.local/bin/guy" digest --planner 2>/dev/null || true)
     notify "Planning your day" "Reading your vault and calendar. About two minutes."
     settings=$(allow Read Glob Grep \
         "Edit(/$vault/10 - Daily Log/**)" "Write(/$vault/10 - Daily Log/**)" \
@@ -134,7 +137,9 @@ run_plan() {
         "${CAL}__create_event" "${CAL}__update_event" "${CAL}__delete_event")
     if ! out=$(cd "$vault" && claude_run "$settings" --no-chrome -- "/eecs-plan-day energy=$energy now=$(now)
 Rules doc (Google Drive id): $(conf .rules_doc_id)
-Calendars: primary=$(conf .calendars.primary) plan=$(conf .calendars.plan) family=$(conf .calendars.family) runna=$(conf .calendars.runna)"); then
+Calendars: primary=$(conf .calendars.primary) plan=$(conf .calendars.plan) family=$(conf .calendars.family) runna=$(conf .calendars.runna)${behavior:+
+
+$behavior}"); then
         fail plan "$out"
         return
     fi

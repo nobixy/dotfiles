@@ -270,6 +270,7 @@ group("A", "assistant", {
     { "p", exec(guy .. " eyes toggle"),                              "camera presence watcher",
         { state = guy .. " is watching" } },
     { "t", exec(guy .. " today"),                                    "today: desk time summary" },
+    { "r", exec("q=$(rofi -dmenu -p 'research') && [ -n \"$q\" ] && " .. guy .. " research \"$q\""), "research the web (sandboxed)" },
     { "w", exec("xdg-open http://127.0.0.1:5600"),                   "ActivityWatch dashboard" },
 }, { status = guy .. " status" })
 

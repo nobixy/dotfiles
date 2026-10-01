@@ -21,6 +21,15 @@ return {
     { "<leader>gt", guy("today"), desc = "Today: desk time summary" },
     { "<leader>gv", guy("talk"), desc = "Talk (press again to send)" },
     { "<leader>gl", guy("look"), desc = "Look: one webcam glance" },
+    {
+      "<leader>gr",
+      function()
+        vim.ui.input({ prompt = "Research: " }, function(q)
+          if q and q ~= "" then guy("research", q)() end
+        end)
+      end,
+      desc = "Research the web (sandboxed)",
+    },
   },
   opts = {
     adapters = {
