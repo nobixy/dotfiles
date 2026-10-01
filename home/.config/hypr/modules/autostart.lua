@@ -17,6 +17,7 @@ hl.on("hyprland.start", function()
 
     -- ActivityWatch (window + AFK log on :5600); the guy's activity worker reads it
     if v.have("awatcher")   then hl.exec_cmd("awatcher --no-tray") end
+    hl.exec_cmd(v.home .. "/.local/bin/guy eyes start")          -- camera presence, unless paused (ALT+A p)
 
     session.restore()
 end)

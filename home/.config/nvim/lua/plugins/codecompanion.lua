@@ -19,6 +19,8 @@ return {
     { "<leader>gi", ":CodeCompanion ", mode = { "n", "v" }, desc = "Inline edit (type a prompt)" },
     { "<leader>gp", "<cmd>CodeCompanionActions<cr>", mode = { "n", "v" }, desc = "Action palette" },
     { "<leader>gt", guy("today"), desc = "Today: desk time summary" },
+    { "<leader>gv", guy("talk"), desc = "Talk (press again to send)" },
+    { "<leader>gl", guy("look"), desc = "Look: one webcam glance" },
   },
   opts = {
     adapters = {

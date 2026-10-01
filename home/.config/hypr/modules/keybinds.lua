@@ -257,12 +257,18 @@ group("I", "study", {
 }, { status = eecs .. " status" })
 
 -- <leader>a: assistant, the local buddy on Ollama (~/.local/bin/guy). Chat
--- opens a floating kitty (class "guy"); the rest answer by notification.
+-- opens a floating kitty (class "guy"); talk answers out loud; the rest by
+-- notification. Waybar's custom/guy shows when the mic or camera is on.
 local guy = v.home .. "/.local/bin/guy"
 group("A", "assistant", {
     { "g", exec("kitty --class guy -e " .. guy .. " chat"),           "chat with your guy" },
     { "s", exec("kitty --class guy -e " .. guy .. " chat --think"),   "chat, think harder (9b)" },
     { "a", exec("q=$(rofi -dmenu -p 'ask your guy') && [ -n \"$q\" ] && " .. guy .. " ask \"$q\""), "quick question" },
+    { "v", exec(guy .. " talk"),                                     "talk (press again to send)",
+        { state = guy .. " is listening" } },
+    { "l", exec(guy .. " look"),                                     "look: one webcam glance" },
+    { "p", exec(guy .. " eyes toggle"),                              "camera presence watcher",
+        { state = guy .. " is watching" } },
     { "t", exec(guy .. " today"),                                    "today: desk time summary" },
     { "w", exec("xdg-open http://127.0.0.1:5600"),                   "ActivityWatch dashboard" },
 }, { status = guy .. " status" })

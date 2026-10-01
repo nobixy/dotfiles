@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
-"""guy: a local buddy, coach and pair programmer on Ollama (ALT+G in Hyprland).
+"""guy: a local buddy, coach and pair programmer on Ollama (ALT+A in Hyprland,
+<leader>g in Neovim).
 
-    guy chat [--think]      talk to him in the terminal (ALT+G g)
-    guy ask TEXT            one question, answer as a notification (ALT+G a)
-    guy today [DATE]        run the activity worker, notify the summary (ALT+G t)
+    guy chat [--think]      talk to him in the terminal (ALT+A g)
+    guy ask TEXT            one question, answer as a notification (ALT+A a)
+    guy talk                push-to-talk: press once to speak, again to send;
+                            he answers out loud (ALT+A v)
+    guy say TEXT            say it out loud (the voice stays loaded 15 min)
+    guy look                one webcam glance, described in words (ALT+A l)
+    guy eyes on|off|toggle|start
+                            the presence watcher: every minute, is someone at
+                            the desk? (ALT+A p; `start` = on unless paused)
+    guy today [DATE]        activity + presence reports, notify the summary (ALT+A t)
     guy run WORKER [DATE]   run one worker in its sandbox, save its report
     guy reports             list the saved reports
-    guy status              one line for the which-key overlay
+    guy status | waybar     one line for which-key / JSON for Waybar
+    guy is listening|watching   exit 0 if the mic / camera watcher is on
+    guy setup               install the Python packages and models (fresh machine)
 
 How it is put together:
   * The orchestrator is the model you chat with. It never touches files,
-    devices or the web. Its only tools are the ones below (list/read reports,
-    run a worker, remember a note), all carried out by this plain script.
-  * Each worker runs under bwrap with an empty $HOME, no devices and only its
-    own scratch dir (~/.local/share/guy/work/<name>). Its one way out is the
-    JSON it prints, which this script checks and saves to reports/. So the
+    devices or the web. Its only tools are the ones in TOOLS (list/read
+    reports, run a report worker, remember a note), carried out by this plain
+    script.
+  * Each worker runs under bwrap with an empty $HOME, only its own scratch dir
+    (~/.local/share/guy/work/<name>) and only the devices in its PROFILE: the
+    ears and voice get the PipeWire socket and no network, the presence watcher
+    gets the camera and no network. A worker's one way out is the JSON it
+    prints, which this script checks and saves to reports/. So the
     orchestrator knows a worker only by its report.
+  * Raw audio and frames never leave a worker's scratch dir and are deleted
+    as soon as they are used. Frames are never written to disk at all.
   * Everything stays in ~/.local/share/guy, never the (public) vault.
 
-Settings: ~/.config/guy/config.json (models, timezone), not in this repo.
+Settings: ~/.config/guy/config.json (models, timezone, about_me, voice), not
+in this repo. Python packages and models: ~/.local/share/guy/{venv,models}.
 """
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,8 +49,10 @@ from pathlib import Path
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "guy/config.json"
 DATA = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "guy"
-REPORTS, WORK, CHATS = DATA / "reports", DATA / "work", DATA / "chat"
-MEMORY = DATA / "memory.md"
+REPORTS, WORK, CHATS, RUN = DATA / "reports", DATA / "work", DATA / "chat", DATA / "run"
+MEMORY, VENV, MODELS = DATA / "memory.md", DATA / "venv", DATA / "models"
+EYES_PAUSED = DATA / "eyes-paused"
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
 
 DEFAULTS = {
     "model": "qwen3.5:4b",          # fits the 8 GB card fully: fast
@@ -41,9 +61,25 @@ DEFAULTS = {
     "activitywatch": "http://127.0.0.1:5600",
     "timezone": "America/New_York",
     "about_me": "",                 # a few lines the orchestrator always knows
+    "voice": "am_michael",          # Kokoro voice
+    "camera": "/dev/video0",
+    "presence_interval": 60,        # seconds between presence checks
+    "talk_max_seconds": 60,
 }
-WORKERS = ("activity",)
 MAX_REPORT = 64_000                 # bytes a worker may hand back
+WAYBAR_SIGNAL = 10
+
+# What each worker's sandbox may reach. save: keep the report in reports/.
+PROFILES = {
+    "activity": {"net": True, "save": True},
+    "presence": {"venv": True, "save": True},          # summarises the watcher's log
+    "presence-watch": {"camera": True, "venv": True, "daemon": True},  # no network
+    "look": {"camera": True, "venv": True, "net": True},
+    "ears": {"audio": True, "venv": True},
+    "voice": {"audio": True, "venv": True, "daemon": True},  # keeps Kokoro loaded
+}
+REPORT_WORKERS = ("activity", "presence")             # the orchestrator may run these
+SCRATCH = {"presence": "presence-watch"}              # shares the watcher's scratch dir
 
 
 def config():
@@ -68,8 +104,15 @@ def ollama_chat(conf, model, messages, tools=None, think=False):
     return http_json(conf["ollama"] + "/api/chat", body)["message"]
 
 
-def notify(title, body=""):
-    subprocess.run(["notify-send", "-a", "guy", title, body[:900]], check=False)
+def notify(title, body="", replace=None):
+    cmd = ["notify-send", "-a", "guy", title, body[:900]]
+    if replace:  # dunst: one notification per tag, updated in place
+        cmd[1:1] = ["-h", f"string:x-dunst-stack-tag:guy-{replace}"]
+    subprocess.run(cmd, check=False)
+
+
+def waybar_refresh():
+    subprocess.run(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"], check=False)
 
 
 def today(conf):
@@ -77,17 +120,31 @@ def today(conf):
     return datetime.now().astimezone().date().isoformat()
 
 
+def pid_alive(name):
+    p = RUN / f"{name}.pid"
+    try:
+        pid = int(p.read_text())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def write_pid(name):
+    RUN.mkdir(parents=True, exist_ok=True)
+    (RUN / f"{name}.pid").write_text(str(os.getpid()))
+
+
 # ---------------------------------------------------------------- sandbox
 
-def run_worker(conf, name, date):
-    """Run a worker under bwrap; save and return its report (a dict)."""
-    if name not in WORKERS:
-        raise ValueError(f"unknown worker {name!r} (have: {', '.join(WORKERS)})")
-    scratch = WORK / name
+def sandbox_cmd(conf, name, args):
+    """The bwrap command line that runs `guy _worker <name> <args>` in its jail."""
+    prof = PROFILES[name]
+    scratch = WORK / SCRATCH.get(name, name)
     scratch.mkdir(parents=True, exist_ok=True)
     script = Path(__file__).resolve()
     cmd = [
-        "bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+        "bwrap", "--unshare-all", "--new-session",
         "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
         "--ro-bind", "/etc/localtime", "/etc/localtime",
@@ -95,23 +152,46 @@ def run_worker(conf, name, date):
         "--tmpfs", str(HOME), "--bind", str(scratch), "/work",
         "--ro-bind", str(script), "/guy",
         "--chdir", "/work", "--setenv", "HOME", "/work", "--setenv", "TZ", conf["timezone"],
-        "--", "python3", "/guy", "_worker", name, date,
+        "--setenv", "OPENCV_LOG_LEVEL", "ERROR",
     ]
-    p = subprocess.run(cmd, input=json.dumps(conf), capture_output=True, text=True, timeout=900)
+    if not prof.get("daemon"):  # a daemon outlives the `guy eyes on` that started it
+        cmd += ["--die-with-parent"]
+    if prof.get("net"):
+        cmd += ["--share-net"]
+    if prof.get("venv"):
+        cmd += ["--ro-bind", str(VENV), str(VENV), "--ro-bind", str(MODELS), "/models"]
+    if prof.get("audio"):
+        sock = RUNTIME / "pipewire-0"
+        cmd += ["--ro-bind", str(sock), "/run/guy/pipewire-0", "--setenv", "XDG_RUNTIME_DIR", "/run/guy"]
+    if prof.get("camera"):
+        cmd += ["--dev-bind", conf["camera"], "/dev/video0"]
+    python = str(VENV / "bin/python") if prof.get("venv") else "python3"
+    return cmd + ["--", python, "/guy", "_worker", name, *args]
+
+
+def run_worker(conf, name, date=None, extra=None):
+    """Run a worker to completion; return its report (saved if its profile says so)."""
+    if name not in PROFILES:
+        raise ValueError(f"unknown worker {name!r}")
+    date = date or today(conf)
+    payload = dict(conf, **(extra or {}))
+    p = subprocess.run(sandbox_cmd(conf, name, [date]), input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         raise RuntimeError(f"worker {name} failed: {p.stderr.strip()[-500:]}")
     if len(p.stdout) > MAX_REPORT:
         raise RuntimeError(f"worker {name} report too large ({len(p.stdout)} bytes)")
     report = json.loads(p.stdout)
     report.update(worker=name, date=date, made=datetime.now().astimezone().isoformat(timespec="seconds"))
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    (REPORTS / f"{name}-{date}.json").write_text(json.dumps(report, indent=1))
+    if PROFILES[name].get("save"):
+        REPORTS.mkdir(parents=True, exist_ok=True)
+        (REPORTS / f"{name}-{date}.json").write_text(json.dumps(report, indent=1))
     return report
 
 
 # ---------------------------------------------------------------- workers
-# These run INSIDE the sandbox: they see /work, the network and nothing else.
-# The config arrives on stdin; the report leaves on stdout.
+# These run INSIDE the sandbox: they see /work, what their profile allows,
+# and nothing else. The config arrives on stdin; the report leaves on stdout.
 
 def worker_activity(conf, date):
     """Desk time from ActivityWatch: totals, timeline, top apps, a summary."""
@@ -179,6 +259,216 @@ def worker_activity(conf, date):
     return report
 
 
+def grab_frame():
+    """A few frames from the camera (the first ones are often dark); None if busy."""
+    import cv2
+    cap = cv2.VideoCapture("/dev/video0", cv2.CAP_V4L2)
+    frame = None
+    try:
+        for _ in range(6):
+            ok, f = cap.read()
+            if ok:
+                frame = f
+    finally:
+        cap.release()
+    return frame
+
+
+def count_faces(detector, frame):
+    h, w = frame.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(frame)
+    return 0 if faces is None else len(faces)
+
+
+def worker_presence_watch(conf, _date):
+    """Forever: every presence_interval seconds, is a face in view? One JSON line
+    each. Frames stay in memory; only {t, face} (or busy) is written."""
+    import cv2
+    detector = cv2.FaceDetectorYN.create("/models/yunet.onnx", "", (640, 480), 0.6)
+    log = Path("/work/presence.jsonl")
+    keep_after = time.time() - 14 * 86400
+    if log.exists():  # drop entries older than two weeks
+        lines = [l for l in log.read_text().splitlines() if l and json.loads(l)["t"] >= keep_after]
+        log.write_text("".join(l + "\n" for l in lines))
+    while True:
+        frame = grab_frame()
+        entry = {"t": int(time.time())}
+        if frame is None:
+            entry["busy"] = True  # e.g. OBS has the camera
+        else:
+            entry["face"] = count_faces(detector, frame) > 0
+        with log.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+        time.sleep(max(15, int(conf["presence_interval"])))
+
+
+def worker_presence(conf, date):
+    """Summarise the watcher's log for one day: minutes seen, by hour, gaps."""
+    tz = datetime.now().astimezone().tzinfo
+    start = datetime.fromisoformat(date).replace(tzinfo=tz).timestamp()
+    end = start + 86400
+    log = Path("/work/presence.jsonl")
+    rows = [json.loads(l) for l in log.read_text().splitlines() if l] if log.exists() else []
+    rows = [r for r in rows if start <= r["t"] < end]
+    if not rows:
+        return {"error": "no presence data for this day (is the watcher on? ALT+A p)"}
+    step = int(conf["presence_interval"]) / 60
+    seen = [r for r in rows if r.get("face")]
+    hours = {}
+    for r in seen:
+        h = datetime.fromtimestamp(r["t"], tz).strftime("%H")
+        hours[h] = hours.get(h, 0) + step
+    # stretches of at least 20 minutes with nobody in view (while watching)
+    gaps, run_start, prev = [], None, None
+    for r in rows:
+        if r.get("face") is False:
+            run_start = run_start or r["t"]
+        else:
+            if run_start and prev and prev - run_start >= 20 * 60:
+                gaps.append({"from": datetime.fromtimestamp(run_start, tz).strftime("%H:%M"),
+                             "minutes": round((prev - run_start) / 60)})
+            run_start = None
+        prev = r["t"]
+    fmt = lambda t: datetime.fromtimestamp(t, tz).strftime("%H:%M")
+    return {
+        "minutes_seen_at_desk": round(len(seen) * step),
+        "first_seen": fmt(seen[0]["t"]) if seen else None,
+        "last_seen": fmt(seen[-1]["t"]) if seen else None,
+        "minutes_seen_by_hour": {h: round(m) for h, m in sorted(hours.items())},
+        "away_from_desk": gaps[:12],
+        "minutes_camera_busy": round(sum(1 for r in rows if r.get("busy")) * step),
+        "watching_from": fmt(rows[0]["t"]), "watching_until": fmt(rows[-1]["t"]),
+    }
+
+
+def worker_look(conf, _date):
+    """One frame, described by the vision model. The frame is never written."""
+    import base64
+    import cv2
+    frame = grab_frame()
+    if frame is None:
+        return {"error": "camera busy or missing"}
+    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    prompt = ("Webcam frame from the user's desk. Answer in ONE short sentence, max 25 words: is a "
+              "person visible, and what are they doing (studying, reading, writing, phone, eating, "
+              "coding, resting)? Only state what you clearly see. Do not describe looks.")
+    msg = ollama_chat(conf, conf["model"], [{"role": "user", "content": prompt,
+                                             "images": [base64.b64encode(jpg.tobytes()).decode()]}])
+    return {"saw": msg["content"].strip()}
+
+
+def whisper_model():
+    import glob
+    from faster_whisper import WhisperModel
+    path = glob.glob("/models/whisper/models--Systran--faster-whisper-small.en/snapshots/*")[0]
+    return WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=8)
+
+
+def worker_ears(conf, _date):
+    """Record until /work/stop appears (or the time limit), transcribe, delete the audio."""
+    import numpy as np
+    import soundfile as sf
+    clip, stop = Path("/work/clip.wav"), Path("/work/stop")
+    stop.unlink(missing_ok=True)
+    rec = subprocess.Popen(["pw-record", "--rate", "16000", "--channels", "1", str(clip)],
+                           stderr=subprocess.DEVNULL)
+    t0 = time.time()
+    while not stop.exists() and time.time() - t0 < int(conf["talk_max_seconds"]) and rec.poll() is None:
+        time.sleep(0.1)
+    rec.send_signal(signal.SIGINT)
+    rec.wait(timeout=5)
+    stop.unlink(missing_ok=True)
+    try:
+        audio, sr = sf.read(clip, dtype="float32")
+    finally:
+        clip.unlink(missing_ok=True)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if sr != 16000:
+        audio = np.interp(np.arange(0, len(audio), sr / 16000), np.arange(len(audio)), audio).astype("float32")
+    segments, _ = whisper_model().transcribe(audio, vad_filter=True, beam_size=1)
+    return {"heard": " ".join(s.text for s in segments).strip(), "seconds": round(len(audio) / 16000, 1)}
+
+
+def worker_voice(conf, _date):
+    """Speak each text file dropped in /work/inbox, sentence by sentence (the next
+    one is synthesised while the current one plays). Exits after 15 idle minutes."""
+    import re
+    import threading
+    import soundfile as sf
+    from kokoro_onnx import Kokoro
+    kokoro = Kokoro("/models/kokoro-v1.0.onnx", "/models/voices-v1.0.bin")
+    inbox = Path("/work/inbox")
+    inbox.mkdir(exist_ok=True)
+    idle_since = time.time()
+    while time.time() - idle_since < 15 * 60:
+        jobs = sorted(inbox.glob("*.txt"))
+        if not jobs:
+            time.sleep(0.1)
+            continue
+        text = jobs[0].read_text()
+        jobs[0].unlink()
+        text = re.sub(r"[*_`#>]|\[|\]\([^)]*\)", "", text)[:1500]  # no markdown read aloud
+        sentences = [x for x in re.split(r"(?<=[.!?])\s+", text.strip()) if x.strip()]
+        player = None
+        for i, sentence in enumerate(sentences):
+            samples, sr = kokoro.create(sentence, voice=conf["voice"], speed=1.05, lang="en-us")
+            wav = Path(f"/work/say{i % 2}.wav")
+            if player:
+                player.join()
+            sf.write(wav, samples, sr)
+            player = threading.Thread(target=subprocess.run, args=(["pw-play", str(wav)],))
+            player.start()
+        if player:
+            player.join()
+        for wav in Path("/work").glob("say*.wav"):
+            wav.unlink()
+        idle_since = time.time()
+    return {}
+
+
+def start_daemon(conf, name):
+    """Start a long-running worker (eyes, voice) once; return its pid."""
+    pid = pid_alive(name)
+    if pid:
+        return pid
+    RUN.mkdir(parents=True, exist_ok=True)
+    p = subprocess.Popen(sandbox_cmd(conf, name, [today(conf)]),
+                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=open(WORK / f"{name}.log", "w"), start_new_session=True, text=True)
+    p.stdin.write(json.dumps(conf))
+    p.stdin.close()
+    (RUN / f"{name}.pid").write_text(str(p.pid))
+    return p.pid
+
+
+def start_daemon_as(conf, worker, pidname):
+    """start_daemon, with the pid file named for the user-facing switch."""
+    pid = pid_alive(pidname)
+    if not pid:
+        pid = start_daemon(conf, worker)
+        (RUN / f"{worker}.pid").rename(RUN / f"{pidname}.pid")
+    return pid
+
+
+def say(conf, text):
+    """Hand text to the voice daemon (starting it if needed)."""
+    start_daemon(conf, "voice")
+    inbox = WORK / "voice" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    tmp = inbox / f"{time.time_ns()}.tmp"
+    tmp.write_text(text)
+    tmp.rename(tmp.with_suffix(".txt"))  # whole file or nothing
+
+
+WORKER_FNS = {
+    "activity": worker_activity, "presence": worker_presence,
+    "presence-watch": worker_presence_watch, "look": worker_look,
+    "ears": worker_ears, "voice": worker_voice,
+}
+
+
 # ---------------------------------------------------------------- orchestrator
 
 TOOLS = [
@@ -190,10 +480,12 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {
         "name": "run_worker",
-        "description": "Run a sandboxed worker for a date and get its fresh report. "
-                       "Workers: activity (desk time, apps and away blocks from ActivityWatch).",
+        "description": "Run a sandboxed worker for a date and get its fresh report. Workers: "
+                       "activity (computer use: desk time, apps, keyboard-away blocks, from ActivityWatch); "
+                       "presence (webcam: minutes a person was seen at the desk, by hour, and away stretches; "
+                       "catches offline study like reading or writing on paper).",
         "parameters": {"type": "object", "properties": {
-            "worker": {"type": "string", "enum": list(WORKERS)},
+            "worker": {"type": "string", "enum": list(REPORT_WORKERS)},
             "date": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["worker", "date"]}}},
     {"type": "function", "function": {
         "name": "remember", "description": "Save one short fact about the user for future chats.",
@@ -208,10 +500,11 @@ def call_tool(conf, name, args):
         p = REPORTS / (Path(str(args.get("name", ""))).name.removesuffix(".json") + ".json")
         return json.loads(p.read_text()) if p.exists() else {"error": "no such report"}
     if name == "run_worker":
-        date = str(args.get("date") or today(conf))
-        if date in ("today", ""):
-            date = today(conf)
-        return run_worker(conf, str(args.get("worker")), date)
+        worker = str(args.get("worker"))
+        if worker not in REPORT_WORKERS:
+            return {"error": f"no worker {worker!r}; have {', '.join(REPORT_WORKERS)}"}
+        date = str(args.get("date") or "")
+        return run_worker(conf, worker, today(conf) if date in ("", "today") else date)
     if name == "remember":
         note = " ".join(str(args.get("note", "")).split())[:300]
         with MEMORY.open("a") as f:
@@ -220,9 +513,11 @@ def call_tool(conf, name, args):
     return {"error": f"unknown tool {name}"}
 
 
-def system_prompt(conf):
+def system_prompt(conf, spoken=False):
     now = datetime.now().astimezone()
     memory = MEMORY.read_text().splitlines()[-40:] if MEMORY.exists() else []
+    style = ("Your answer will be spoken aloud: two or three short sentences, no lists, no markdown, no code."
+             if spoken else "For code, be precise and show small snippets.")
     return f"""You are the user's guy: a friend, coach and pair programmer living on their Linux machine.
 It is {now:%A %Y-%m-%d %H:%M} ({conf['timezone']}).
 
@@ -230,11 +525,13 @@ About them: {conf['about_me'] or 'not filled in yet; ask and remember.'}
 
 How you talk: short, warm, casual, like a good friend. One idea at a time. Never judge a lapse;
 treat it as a missing catch block to patch. Prefer tiny next steps and environment tweaks over
-willpower. For code, be precise and show small snippets.
+willpower. {style}
 
 What you know about their day comes only from worker reports. Use the tools: run_worker for
-fresh data (dates as YYYY-MM-DD), read_report for saved ones. Never invent numbers. Use
-remember for lasting facts they tell you.
+fresh data (dates as YYYY-MM-DD), read_report for saved ones. Activity is computer use;
+presence is whether the webcam saw them at the desk, which also catches offline study.
+Numbers in earlier messages go stale: for any question about today, call run_worker again.
+Never invent numbers. Use remember for lasting facts they tell you.
 
 Things you remember:
 """ + ("\n".join(memory) or "(nothing yet)")
@@ -264,11 +561,21 @@ def chat_log(conf):
     return CHATS / f"{today(conf)}.jsonl"
 
 
+def log_messages(conf, messages):
+    with chat_log(conf).open("a") as f:
+        for m in messages:
+            f.write(json.dumps(m) + "\n")
+
+
+def recent_history(conf, n=20):
+    log = chat_log(conf)
+    return [json.loads(l) for l in log.read_text().splitlines()][-n:] if log.exists() else []
+
+
 def cmd_chat(conf, think):
     import readline  # noqa: F401  (line editing for input())
     model = conf["think_model"] if think else conf["model"]
-    log = chat_log(conf)
-    history = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+    history = recent_history(conf, 1000)
     print(f"guy ({model}) — ctrl-d to leave. Today's chat continues where it stopped.\n")
     while True:
         try:
@@ -287,48 +594,167 @@ def cmd_chat(conf, think):
             print(f"guy › (error: {exc})\n")
             continue
         print(f"guy › {answer}\n")
-        new = messages[start:]
-        history += new
-        with log.open("a") as f:
-            for m in new:
-                f.write(json.dumps(m) + "\n")
+        history += messages[start:]
+        log_messages(conf, messages[start:])
+
+
+def ask(conf, text, spoken=False):
+    """One turn with today's recent chat as context; logged; returns the answer."""
+    messages = [{"role": "system", "content": system_prompt(conf, spoken)}] + recent_history(conf)
+    start = len(messages)
+    messages.append({"role": "user", "content": text})
+    answer = converse(conf, messages, conf["model"])
+    log_messages(conf, messages[start:])
+    return answer
 
 
 def cmd_ask(conf, text):
-    messages = [{"role": "system", "content": system_prompt(conf)}, {"role": "user", "content": text}]
-    answer = converse(conf, messages, conf["model"])
-    with chat_log(conf).open("a") as f:
-        for m in messages[1:]:
-            f.write(json.dumps(m) + "\n")
+    answer = ask(conf, text)
     print(answer)
     notify("guy", answer)
 
 
-def cmd_today(conf, date):
+def cmd_talk(conf):
+    """Toggle: start listening, or stop and answer out loud."""
+    if pid_alive("talk"):
+        (WORK / "ears").mkdir(parents=True, exist_ok=True)
+        (WORK / "ears" / "stop").touch()
+        return
+    # detach so the keybind returns at once; this child runs the whole turn
+    if os.fork():
+        return
+    os.setsid()
+    write_pid("talk")
+    waybar_refresh()
     try:
-        r = run_worker(conf, "activity", date or today(conf))
+        notify("guy is listening…", "press ALT+A v again to send", replace="talk")
+        heard = run_worker(conf, "ears").get("heard", "")
+        waybar_refresh()
+        if not heard:
+            notify("guy", "didn't catch anything", replace="talk")
+            return
+        notify(f"you: {heard}", "thinking…", replace="talk")
+        answer = ask(conf, heard, spoken=True)
+        notify(f"you: {heard}", answer, replace="talk")
+        say(conf, answer)
+    except Exception as exc:
+        notify("guy: talk failed", str(exc)[-400:], replace="talk")
+    finally:
+        (RUN / "talk.pid").unlink(missing_ok=True)
+        waybar_refresh()
+    os._exit(0)
+
+
+def cmd_look(conf):
+    notify("guy is looking…", replace="look")
+    try:
+        saw = run_worker(conf, "look").get("saw") or "camera busy"
+    except Exception as exc:
+        saw = f"(failed: {exc})"
+    # the orchestrator learns of the glance only through this text
+    log_messages(conf, [{"role": "user", "content": f"[webcam glance at {datetime.now():%H:%M}] {saw}"}])
+    print(saw)
+    notify("guy saw", saw, replace="look")
+
+
+def cmd_eyes(conf, action):
+    pid = pid_alive("eyes")
+    if action == "toggle":
+        action = "off" if pid else "on"
+    if action == "off":
+        EYES_PAUSED.touch()
+        if pid:
+            os.killpg(pid, signal.SIGTERM)
+            (RUN / "eyes.pid").unlink(missing_ok=True)
+        notify("guy: camera off", "presence watching paused", replace="eyes")
+    elif action in ("on", "start"):
+        if action == "start" and EYES_PAUSED.exists():
+            return
+        EYES_PAUSED.unlink(missing_ok=True)
+        start_daemon_as(conf, "presence-watch", "eyes")
+        if action == "on":
+            notify("guy: camera on", f"checks the desk every {conf['presence_interval']} s; no frames saved", replace="eyes")
+    else:
+        raise SystemExit("usage: guy eyes on|off|toggle|start")
+    waybar_refresh()
+
+
+def cmd_today(conf, date):
+    date = date or today(conf)
+    try:
+        r = run_worker(conf, "activity", date)
     except Exception as exc:
         notify("guy: activity failed", str(exc))
         raise SystemExit(str(exc))
-    head = f"{r.get('active_minutes', 0) // 60}h{r.get('active_minutes', 0) % 60:02d}m at the desk"
+    try:
+        seen = run_worker(conf, "presence", date).get("minutes_seen_at_desk")
+    except Exception:
+        seen = None
+    m = r.get("active_minutes", 0)
+    head = f"{m // 60}h{m % 60:02d}m on the computer"
     if r.get("first_active"):
         head += f", {r['first_active']}–{r['last_active']}"
+    if seen is not None:
+        head += f" · seen at desk {seen // 60}h{seen % 60:02d}m"
     print(head + "\n\n" + r.get("summary", r.get("error", "")))
     notify(f"guy · {head}", r.get("summary", r.get("error", "")))
 
 
-def cmd_status(conf):
+def ollama_up(conf):
     try:
         http_json(conf["ollama"] + "/api/version", timeout=1)
-        up = conf["model"]
+        return True
     except Exception:
-        up = "ollama down"
+        return False
+
+
+def cmd_status(conf):
+    up = conf["model"] if ollama_up(conf) else "ollama down"
+    eyes = "camera on" if pid_alive("eyes") else "camera off"
     p = REPORTS / f"activity-{today(conf)}.json"
     if p.exists():
         m = json.loads(p.read_text()).get("active_minutes", 0)
-        print(f"{up} · desk {m // 60}h{m % 60:02d}m (last report)")
+        print(f"{up} · {eyes} · desk {m // 60}h{m % 60:02d}m (last report)")
     else:
-        print(f"{up} · no activity report today")
+        print(f"{up} · {eyes} · no activity report today")
+
+
+def cmd_waybar(conf):
+    """Privacy indicator: mic while listening, eye while the camera watcher runs."""
+    talk, eyes = pid_alive("talk"), pid_alive("eyes")
+    parts = (["󰍬"] if talk else []) + (["󰈈"] if eyes else [])
+    tip = [("listening (mic on)" if talk else "mic off"),
+           ("presence watcher on: camera checks every %ss" % conf["presence_interval"] if eyes else "camera off"),
+           "click: camera on/off"]
+    print(json.dumps({"text": " ".join(parts) or "󰈉", "tooltip": "\n".join(tip),
+                      "class": "on" if (talk or eyes) else "off"}))
+
+
+def cmd_setup():
+    """Python packages and models for the ears, voice and eyes (~1.2 GB)."""
+    if not (VENV / "bin/python").exists():
+        subprocess.run(["uv", "venv", "-q", str(VENV)], check=True)
+    subprocess.run(["uv", "pip", "install", "-q", "faster-whisper", "kokoro-onnx",
+                    "opencv-python-headless", "soundfile"],
+                   env=dict(os.environ, VIRTUAL_ENV=str(VENV)), check=True)
+    MODELS.mkdir(parents=True, exist_ok=True)
+    files = {
+        "kokoro-v1.0.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+        "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+        "yunet.onnx": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    }
+    for name, url in files.items():
+        if not (MODELS / name).exists():
+            print("downloading", name)
+            urllib.request.urlretrieve(url, MODELS / name)
+    subprocess.run([str(VENV / "bin/python"), "-c",
+                    "from faster_whisper import WhisperModel; "
+                    f"WhisperModel('small.en', device='cpu', compute_type='int8', download_root='{MODELS / 'whisper'}')"],
+                   check=True)
+    conf = config()
+    for model in (conf["model"], conf["think_model"]):
+        subprocess.run(["ollama", "pull", model], check=True)
+    print("ready")
 
 
 def main(argv):
@@ -336,21 +762,34 @@ def main(argv):
     cmd, rest = (argv[0], argv[1:]) if argv else ("chat", [])
     if cmd == "_worker":  # inside the sandbox
         conf = json.load(sys.stdin)
-        fn = {"activity": worker_activity}[rest[0]]
-        json.dump(fn(conf, rest[1]), sys.stdout)
+        json.dump(WORKER_FNS[rest[0]](conf, rest[1]), sys.stdout)
     elif cmd == "chat":
         cmd_chat(conf, "--think" in rest)
     elif cmd == "ask":
         cmd_ask(conf, " ".join(rest) or sys.stdin.read())
+    elif cmd == "talk":
+        cmd_talk(conf)
+    elif cmd == "look":
+        cmd_look(conf)
+    elif cmd == "say":
+        say(conf, " ".join(rest) or sys.stdin.read())
+    elif cmd == "eyes":
+        cmd_eyes(conf, rest[0] if rest else "toggle")
     elif cmd == "today":
         cmd_today(conf, rest[0] if rest else None)
     elif cmd == "run":
-        print(json.dumps(run_worker(conf, rest[0], rest[1] if len(rest) > 1 else today(conf)), indent=1))
+        print(json.dumps(run_worker(conf, rest[0], rest[1] if len(rest) > 1 else None), indent=1))
     elif cmd == "reports":
         for p in sorted(REPORTS.glob("*.json"), reverse=True):
             print(p.stem)
     elif cmd == "status":
         cmd_status(conf)
+    elif cmd == "setup":
+        cmd_setup()
+    elif cmd == "waybar":
+        cmd_waybar(conf)
+    elif cmd == "is":  # for which-key badges: exit 0 if on
+        return 0 if pid_alive({"listening": "talk", "watching": "eyes"}[rest[0]]) else 1
     else:
         print(__doc__)
         return 2
