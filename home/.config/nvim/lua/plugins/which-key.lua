@@ -9,6 +9,7 @@ return {
       { "<leader>d", group = "debug" },
       { "<leader>e", group = "explorer" },
       { "<leader>f", group = "find" },
+      { "<leader>g", group = "guy", mode = { "n", "v" } },
       { "<leader>h", group = "git hunk", mode = { "n", "v" } },
       { "<leader>i", group = "study" },
       { "<leader>m", group = "format" },
