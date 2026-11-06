@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Start the shared controller before the GUI; never create competing sessions.
+set -euo pipefail
+exec python3 "$HOME/.config/waybar/scripts/audio-menu.py" headphones

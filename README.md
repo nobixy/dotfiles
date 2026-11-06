@@ -86,3 +86,49 @@ On different hardware, check these:
 
 Further reading: `man stow`, and [The Missing Semester, lecture 5](https://missing.csail.mit.edu/2020/command-line/)
 (dotfiles and the command-line environment).
+
+## Audio from Waybar
+
+Click the audio button for headphone controls, noise control, music presets,
+output selection, and app/microphone volumes. Right-click mutes; middle-click opens
+the mixer. Scrolling and the volume keys use the same controls. Volume boost is
+enabled by default so quiet media can be amplified up to 150%, including on the
+XM5. The Volume boost menu also offers Normal mode with a 100% headphone limit.
+Enabling boost leaves the current level alone; turning it off returns overdriven
+headphones to 100%. This choice is remembered locally. Amplification can distort
+louder recordings; a volume percentage is not a hearing-safe sound-pressure measurement.
+
+Sony WH-1000XM5 presets live in the headphones, with no additional computer EQ:
+
+| Preset | Clear Bass | 400 Hz | 1 kHz | 2.5 kHz | 6.3 kHz | 16 kHz |
+| --- | --- | --- | --- | --- | --- | --- |
+| Punch and detail | 5 | -2 | 0 | +2 | +1 | +1 |
+| More bass | 8 | -2 | 0 | +2 | +1 | +1 |
+| Previous sound | 8 | -1 | +1 | 0 | +3 | +5 |
+
+These are Sony slider values, not calibrated acoustic decibels. Preset changes
+keep the current noise-control mode. Choose Noise cancelling to reduce outside
+noise, or Ambient Sound to hear your surroundings. Nothing changes automatically
+when the menu opens or a headset connects.
+
+`install.sh` installs the Qt runtime and calls `install-sony-audio.sh`, which
+verifies the pinned [Sony Device Center v0.1.6 source](https://github.com/marconvcm/sony-device-center/tree/897022b041b7b312f6ccbd6956e5f0c6e6e76b57)
+archive SHA256, builds against the installed Qt, and smoke-tests the GUI with a
+simulated headset before installing under `~/.local/opt/`. The upstream prebuilt
+GUI is incompatible with this Arch Qt build. Installed binaries
+and Bluetooth addresses stay out of Git. To reinstall only the app, run
+`./install-sony-audio.sh` after the configs have been linked. It rebuilds when Qt
+or the build recipe changes and preserves the previous install on build failure. This setup is for
+x86_64 Linux. The controller starts on demand, shares one connection between the
+menu and GUI, and reconnects when the headphones return. It is not enabled at login.
+
+The mentor/verifier comparison favored the Sony's onboard controls for this setup:
+[EasyEffects](https://github.com/wwmm/easyeffects) remains the full-featured choice
+for computer EQ, metering and limiting; [JamesDSP](https://github.com/Audio4Linux/JDSP4Linux)
+is an alternative with bass and dynamics effects; [AutoEq](https://github.com/jaakkopasanen/AutoEq)
+provides measured-model correction starting points. Stacking those on the current
+Sony EQ was avoided. The selected tuning is a listening preference, not an objective
+claim of the best possible sound.
+
+Validation: `python3 -m unittest discover -s tests -q`, `./check.sh`, and an actual headset
+check of preset/noise readback, the GUI, and shared connection recovery.

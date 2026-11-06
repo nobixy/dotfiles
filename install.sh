@@ -32,6 +32,9 @@ step "Linking configs into ~ (stow)"
 mkdir -p ~/.config ~/.local/share ~/.local/bin ~/.local/state
 stow --restow --target="$HOME" home
 
+step "Sony headphone controls (verified, user-local release)"
+"$DOTFILES/install-sony-audio.sh"
+
 step "Installing yay and the AUR packages from packages/aur.txt"
 if ! command -v yay >/dev/null; then
     tmp=$(mktemp -d)

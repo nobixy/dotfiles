@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Sony Device Center
+Comment=Headphone sound, noise cancelling and battery
+Exec=sh -c "exec \\"\\$HOME/.local/bin/sony-device-center\\""
+Icon=audio-headphones
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;
+Keywords=sony;headphones;noise;cancelling;equalizer;bass;
+StartupNotify=true

@@ -7,7 +7,7 @@ sink=@DEFAULT_AUDIO_SINK@
 source=@DEFAULT_AUDIO_SOURCE@
 
 case "${1:-}" in
-    up)   wpctl set-mute "$sink" 0; wpctl set-volume -l 1.5 "$sink" 5%+ ;;
+    up)   python3 "$HOME/.config/waybar/scripts/audio-menu.py" volume-up ;;
     down) wpctl set-volume "$sink" 5%- ;;
     mute) wpctl set-mute "$sink" toggle ;;
     mic)  wpctl set-mute "$source" toggle ;;

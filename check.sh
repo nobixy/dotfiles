@@ -27,6 +27,11 @@ git_config() { git config -f "$H/.gitconfig" --list >/dev/null; }
 tmux_config() { tmux -L dotfiles-check -f /dev/null start-server \; source-file "$H/.config/tmux/tmux.conf" \; kill-server; }
 python_syntax() { python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$1"; }
 
+audio_checks() {
+    local out
+    out=$(python3 -m unittest discover -s "$DOTFILES/tests" -q 2>&1) || { printf '%s\n' "$out"; return 1; }
+}
+check "audio controls" audio_checks
 check "Hyprland config" hypr_config
 check "zsh syntax" zsh -n "$H/.zshrc"
 check "git config" git_config

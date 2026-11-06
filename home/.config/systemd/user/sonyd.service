@@ -1,0 +1,14 @@
+[Unit]
+Description=Sony headphone controls
+Documentation=https://github.com/marconvcm/sony-device-center
+After=dbus.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/opt/sony-device-center/0.1.6-native/bin/sonyd
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+# Started on demand by the Waybar menu and app launcher.

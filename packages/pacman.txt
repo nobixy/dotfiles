@@ -142,3 +142,8 @@ zsh-doc
 zsh-history-substring-search
 zsh-lovers
 zsh-syntax-highlighting
+python
+bluez-libs
+qt6-base
+qt6-declarative
+dbus

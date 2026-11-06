@@ -72,10 +72,13 @@
                 "headphone": "󰋋",
                 "default": ["󰕿", "󰖀", "󰕾"]
             },
-            "tooltip-format": "{desc}: {volume}%",
+            "tooltip-format": "{desc}: {volume}%\nClick: audio menu · Right-click: mute\nMiddle-click: app volumes · Scroll: volume",
             "scroll-step": 5,
             "max-volume": 150,
-            "on-click": "pavucontrol",
+            "on-click": "python3 ~/.config/waybar/scripts/audio-menu.py",
+            "on-click-middle": "pavucontrol",
+            "on-scroll-up": "~/.config/hypr/scripts/volume.sh up",
+            "on-scroll-down": "~/.config/hypr/scripts/volume.sh down",
             "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
         },
 
